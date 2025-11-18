@@ -1,51 +1,52 @@
-from typing import Any, Dict, Callable
+from __future__ import annotations
 import asyncio
-from dataflow_agent.logger import get_logger
+from typing import Dict, Callable, Any, List, Optional
+from langchain_core.tools import Tool
+from one_eval.logger import get_logger
 
 log = get_logger(__name__)
 
 class ToolManager:
-    """工具管理器"""
+    """支持 pre_tool + post_tool + 执行前置工具"""
+
     def __init__(self):
-        # 全局工具
-        self.tools: Dict[str, Callable] = {}
-        # 角色区分的工具
-        self.role_tools: Dict[str, Dict[str, Callable]] = {}
+        # role -> name -> func(state) or async func(state)
+        self.role_pre_tools: Dict[str, Dict[str, Callable]] = {}
+        # role -> [Tool]
+        self.role_post_tools: Dict[str, List[Tool]] = {}
 
-    def register_tool(self, name: str, func: Callable):
-        self.tools[name] = func
-        log.info(f"Registered tool: {name}")
+    # ---------- pre tools ----------
+    def register_pre_tool(self, *, role: str, name: str, func: Callable):
+        if role not in self.role_pre_tools:
+            self.role_pre_tools[role] = {}
+        self.role_pre_tools[role][name] = func
+        log.info(f"[ToolManager] 注册 pre_tool: role={role}, name={name}")
 
-    def register_custom_tool(self, name: str, func, role: str = None, override: bool = False):
-        """注册自定义工具，可按角色分类"""
-        if role:
-            if role not in self.role_tools:
-                self.role_tools[role] = {}
-            if not override and name in self.role_tools[role]:
-                log.warning(f"Tool '{name}' already exists for role '{role}', skipped.")
-                return
-            self.role_tools[role][name] = func
-            log.info(f"Registered custom tool '{name}' for role '{role}'")
-        else:
-            if not override and name in self.tools:
-                log.warning(f"Global tool '{name}' already exists, skipped.")
-                return
-            self.tools[name] = func
-            log.info(f"Registered global custom tool: {name}")
+    async def execute_pre_tools(self, role: str, state: Any) -> Dict[str, Any]:
+        results: Dict[str, Any] = {}
+        tools = self.role_pre_tools.get(role, {})
+        for name, func in tools.items():
+            try:
+                if asyncio.iscoroutinefunction(func):
+                    results[name] = await func(state)
+                else:
+                    results[name] = func(state)
+            except Exception as e:
+                log.error(f"[ToolManager] pre_tool 失败: role={role}, name={name}, err={e}")
+                results[name] = None
+        return results
 
-    def get_tool(self, name: str, role: str = None) -> Callable:
-        if role and role in self.role_tools and name in self.role_tools[role]:
-            return self.role_tools[role][name]
-        return self.tools[name]
+    # ---------- post tools ----------
+    def register_post_tool(self, tool: Tool, role: str):
+        if role not in self.role_post_tools:
+            self.role_post_tools[role] = []
+        self.role_post_tools[role].append(tool)
+        log.info(f"[ToolManager] 注册 post_tool: role={role}, name={tool.name}")
 
-    async def execute(self, name: str, *args, role: str = None, **kwargs) -> Any:
-        func = self.get_tool(name, role)
-        if asyncio.iscoroutinefunction(func):
-            return await func(*args, **kwargs)
-        return func(*args, **kwargs)
+    def get_post_tools(self, role: str) -> List[Tool]:
+        return self.role_post_tools.get(role, [])
 
-
-_tool_manager = None
+_tool_manager: Optional[ToolManager] = None
 
 def get_tool_manager() -> ToolManager:
     global _tool_manager

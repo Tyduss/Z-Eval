@@ -6,6 +6,14 @@ import copy
 import uuid
 
 @dataclass
+class BenchInfo:
+    bench_name: str
+    bench_table_exist: bool = False
+    bench_source_url: str = None
+    meta: Dict[str, Any] = field(default_factory=dict)
+    dataset_cache: Optional[str] = None
+
+@dataclass
 class NodeState(MainState):
     """Global state container for One-Eval graph execution."""
 
@@ -18,12 +26,11 @@ class NodeState(MainState):
     user_query: Optional[str] = None               # e.g. "评估模型在文本过滤任务的表现"
     task_domain: Optional[str] = None              # "text", "vision", "math" 等
     target_model: Optional[str] = None             # 被测模型名或本地路径
+    temp: Dict[str, Any] = field(default_factory=dict)  # 临时存储，用于中间结果
     reference_models: List[str] = field(default_factory=list) # 预留semantic评估接口
 
     # === 数据与评测基准 ===
-    benches: List[str] = field(default_factory=list)         # Benchmark 名称列表
-    bench_meta: Dict[str, Any] = field(default_factory=dict) # 每个bench的meta信息
-    dataset_cache: Dict[str, str] = field(default_factory=dict) # 每个bench的数据集缓存路径
+    benches: List[BenchInfo] = field(default_factory=list)
 
     # === 评测规划与结果 ===
     key_plan: Dict[str, Any] = field(default_factory=dict)   # 输入输出字段映射
