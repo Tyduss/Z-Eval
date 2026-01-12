@@ -1,107 +1,22 @@
 from __future__ import annotations
 
-import asyncio
 import os
-import shutil
-import inspect
-import traceback
 from pathlib import Path
-from typing import Optional, Tuple
-
-from huggingface_hub import snapshot_download
-from tqdm import tqdm
 
 from one_eval.core.node import BaseNode
-from one_eval.core.state import NodeState, BenchInfo
+from one_eval.core.state import NodeState
 from one_eval.logger import get_logger
+from one_eval.toolkits.hf_download_tool import HFDownloadTool
 
 log = get_logger("DownloadNode")
 
 
-def _safe_dirname(name: str) -> str:
-    # "openai/gsm8k" -> "openai__gsm8k"
-    return name.replace("/", "__").replace("\\", "__").strip()
-
-
-def _get_hf_repo(bench: BenchInfo) -> Optional[str]:
-    meta = bench.meta or {}
-    hf_meta = (meta.get("hf_meta") or {}) if isinstance(meta, dict) else {}
-    repo = hf_meta.get("hf_repo")
-    if isinstance(repo, str) and repo.strip():
-        return repo.strip()
-    return None
-
-
-def _ensure_dir(p: Path) -> None:
-    p.mkdir(parents=True, exist_ok=True)
-
-
-def _dir_nonempty(p: Path) -> bool:
-    return p.exists() and p.is_dir() and any(p.iterdir())
-
-
-def _download_one_hf_repo(
-    hf_repo: str,
-    target_dir: Path,
-) -> Tuple[bool, str]:
-    """
-    Returns: (ok, msg)
-    """
-    try:
-        _ensure_dir(target_dir)
-
-        hf_endpoint = os.getenv("HF_ENDPOINT", "(not set)")
-        hf_offline = os.getenv("HF_HUB_OFFLINE", "(not set)")
-        http_proxy = os.getenv("HTTP_PROXY", "(not set)")
-        https_proxy = os.getenv("HTTPS_PROXY", "(not set)")
-        all_proxy = os.getenv("ALL_PROXY", "(not set)")
-        no_proxy = os.getenv("NO_PROXY", "(not set)")
-        requests_ca_bundle = os.getenv("REQUESTS_CA_BUNDLE", "(not set)")
-        ssl_cert_file = os.getenv("SSL_CERT_FILE", "(not set)")
-
-        log.info(
-            f"[DownloadNode] start snapshot_download repo={hf_repo} target_dir={target_dir} "
-            f"HF_ENDPOINT={hf_endpoint} HF_HUB_OFFLINE={hf_offline} "
-            f"HTTP_PROXY={http_proxy} HTTPS_PROXY={https_proxy} ALL_PROXY={all_proxy} NO_PROXY={no_proxy} "
-            f"REQUESTS_CA_BUNDLE={requests_ca_bundle} SSL_CERT_FILE={ssl_cert_file}"
-        )
-
-        # 直接把 dataset repo 拉到目标目录（不写入全局 HF cache 的那套层级目录）
-        kwargs = {
-            "repo_id": hf_repo,
-            "repo_type": "dataset",
-            "local_dir": str(target_dir),
-            "local_dir_use_symlinks": False,  # 防止跨机器/跨盘符软链问题
-            "ignore_patterns": ["*.h5", "*.ckpt"],  # 可按需删掉；避免误拉很大的无关文件
-        }
-
-        # 按需显式传入 endpoint（若 huggingface_hub 版本支持该参数）
-        try:
-            sig = inspect.signature(snapshot_download)
-            if (
-                "endpoint" in sig.parameters
-                and isinstance(hf_endpoint, str)
-                and hf_endpoint
-                and hf_endpoint != "(not set)"
-            ):
-                kwargs["endpoint"] = hf_endpoint
-        except Exception:
-            pass
-
-        snapshot_download(**kwargs)
-        return True, "success"
-    except Exception as e:
-        err = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-        return False, err
-
-
 class DownloadNode(BaseNode):
     """
-    Step2-Node1: DownloadNode
-    - 从 state.benches 读取 meta.hf_meta.hf_repo
-    - 下载到 bench.dataset_cache（若为空则 ./cache）
-    - 每个 bench 最多重试 3 次
-    - 不 raise，失败写 bench.download_status 和 bench.meta['download_error']
+    Step2-Node3: DownloadNode
+    - 读取 bench.meta["download_config"]
+    - 调用 HFDownloadTool 下载并转换
+    - 更新 bench.dataset_cache 指向生成的 jsonl 文件
     """
 
     def __init__(self, max_retries: int = 3):
@@ -117,74 +32,105 @@ class DownloadNode(BaseNode):
             self.logger.warning("[DownloadNode] state.benches 为空，跳过下载。")
             return state
 
-        # 默认 cache 根目录：当前工作目录下 ./cache
+        # 默认 cache 根目录
         default_cache_root = Path(os.getcwd()) / "cache"
-        _ensure_dir(default_cache_root)
+        if not default_cache_root.exists():
+            default_cache_root.mkdir(parents=True, exist_ok=True)
 
-        downloaded_count = 0
-        with tqdm(total=len(benches), desc="Downloading benches", unit="bench") as pbar:
-            for bench in benches:
-                try:
-                    bench.download_status = "pending"
+        tool = HFDownloadTool(cache_dir=str(default_cache_root))
 
-                    hf_repo = _get_hf_repo(bench)
-                    if not hf_repo:
-                        bench.download_status = "failed"
-                        (bench.meta or {}).update({"download_error": "missing hf_meta.hf_repo"})
-                        self.logger.error(
-                            f"[DownloadNode] {bench.bench_name} 缺少 meta.hf_meta.hf_repo，无法下载。"
+        for bench in benches:
+            try:
+                # 0. 预检查：如果 bench 已经标记为下载成功且文件存在，直接跳过
+                if bench.download_status == "success" and bench.dataset_cache:
+                     p = Path(bench.dataset_cache)
+                     if p.exists() and p.stat().st_size > 0:
+                         self.logger.info(f"[{bench.bench_name}] 已标记为成功且文件存在: {p}")
+                         continue
+
+                bench.download_status = "pending"
+
+                # 1. 获取推荐配置
+                dl_config = bench.meta.get("download_config")
+                hf_repo = None
+                if bench.meta and "hf_meta" in bench.meta:
+                    hf_repo = bench.meta["hf_meta"].get("hf_repo")
+
+                if not hf_repo:
+                    hf_repo = bench.bench_name
+
+                if not dl_config:
+                    self.logger.warning(
+                        f"[{hf_repo}] 缺少 download_config，尝试使用默认配置 (default/test)"
+                    )
+                    dl_config = {"config": "default", "split": "test"}
+
+                config_name = dl_config.get("config", "default")
+                split_name = dl_config.get("split", "test")
+
+                # === Config 自动修正逻辑 ===
+                # 如果 config 是 default，但结构信息里没有 default，则尝试自动修正
+                structure = bench.meta.get("structure", {})
+                if structure and structure.get("ok"):
+                    subsets = structure.get("subsets", [])
+                    available_configs = [s.get("subset") for s in subsets if s.get("subset")]
+                    
+                    if available_configs and config_name not in available_configs:
+                        self.logger.info(f"[{hf_repo}] Config '{config_name}' 不在可用列表中 {available_configs}，尝试自动修正...")
+                        if "main" in available_configs:
+                            config_name = "main"
+                        else:
+                            config_name = available_configs[0]
+                        self.logger.info(f"[{hf_repo}] 修正后的 Config: {config_name}")
+
+                # 2. 确定输出路径
+                # 结构: cache/repo__config__split.jsonl
+                safe_repo = hf_repo.replace("/", "__")
+                filename = f"{safe_repo}__{config_name}__{split_name}.jsonl"
+                output_path = default_cache_root / filename
+
+                if output_path.exists() and output_path.stat().st_size > 0:
+                    self.logger.info(f"[{hf_repo}] 文件已存在: {output_path}")
+                    bench.dataset_cache = str(output_path)
+                    bench.download_status = "success"
+                    continue
+
+                # 3. 下载
+                ok = False
+                last_err = ""
+                for i in range(self.max_retries):
+                    res = tool.download_and_convert(
+                        repo_id=hf_repo,
+                        config_name=config_name,
+                        split=split_name,
+                        output_path=output_path,
+                    )
+
+                    if res.get("ok"):
+                        ok = True
+                        break
+                    else:
+                        last_err = res.get("error")
+                        self.logger.warning(
+                            f"[{hf_repo}] 下载重试 {i+1}/{self.max_retries}: {last_err}"
                         )
-                        continue
 
-                    cache_root = Path(bench.dataset_cache).expanduser().resolve() if bench.dataset_cache else default_cache_root
-                    _ensure_dir(cache_root)
-
-                    bench_dir = cache_root / _safe_dirname(hf_repo)
-                    bench.dataset_cache = str(cache_root)  # 统一把根目录写回去（你也可以改成 bench_dir）
-
-                    # 已经下载过就直接跳过
-                    if _dir_nonempty(bench_dir):
-                        bench.download_status = "success"
-                        (bench.meta or {}).pop("download_error", None)
-                        self.logger.info(f"[DownloadNode] {bench.bench_name} 已存在缓存：{bench_dir}")
-                        downloaded_count += 1
-                        pbar.n = downloaded_count
-                        pbar.refresh()
-                        continue
-
-                    last_err = ""
-                    for attempt in range(1, self.max_retries + 1):
-                        ok, msg = _download_one_hf_repo(hf_repo, bench_dir)
-                        if ok:
-                            bench.download_status = "success"
-                            (bench.meta or {}).pop("download_error", None)
-                            self.logger.success(
-                                f"[DownloadNode] 下载成功: {bench.bench_name} <- {hf_repo} -> {bench_dir}"
-                            )
-                            downloaded_count += 1
-                            pbar.n = downloaded_count
-                            pbar.refresh()
-                            break
-
-                        last_err = msg
-                        self.logger.error(
-                            f"[DownloadNode] 下载失败(第{attempt}/{self.max_retries}次): {bench.bench_name} <- {hf_repo} | err={msg}"
-                        )
-
-                        # 清理可能的半成品，避免下次误判 non-empty
-                        try:
-                            if bench_dir.exists():
-                                shutil.rmtree(bench_dir, ignore_errors=True)
-                        except Exception:
-                            pass
-
-                    if bench.download_status != "success":
-                        bench.download_status = "failed"
-                        (bench.meta or {}).update({"download_error": last_err})
-                except Exception as e:
-                    # 单个 bench 的异常不影响整体流程
+                if ok:
+                    bench.dataset_cache = str(output_path)
+                    bench.download_status = "success"
+                    self.logger.info(f"[{hf_repo}] 下载成功 -> {output_path}")
+                else:
                     bench.download_status = "failed"
-                    (bench.meta or {}).update({"download_error": str(e)})
-                    self.logger.error(f"[DownloadNode] 处理 bench={bench.bench_name} 时异常: {e}")
+                    if not bench.meta:
+                        bench.meta = {}
+                    bench.meta["download_error"] = last_err
+                    self.logger.error(f"[{hf_repo}] 下载失败: {last_err}")
+
+            except Exception as e:
+                bench.download_status = "failed"
+                if not bench.meta:
+                    bench.meta = {}
+                bench.meta["download_error"] = str(e)
+                self.logger.error(f"[{bench.bench_name}] 异常: {e}")
 
         return state

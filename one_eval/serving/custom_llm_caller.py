@@ -148,3 +148,9 @@ class CustomLLMCaller(BaseLLMCaller):
         ).bind_tools(post_tools)
 
         return await llm.ainvoke(messages)
+
+    async def ainvoke(self, messages: List[BaseMessage], **kwargs) -> AIMessage:
+        """兼容 LangChain Runnable 接口"""
+        # 默认这里只做简单的对话，不绑定工具
+        # 如果需要工具，Agent 层应该显式调用 call(bind_post_tools=True)
+        return await self.call(messages, bind_post_tools=False)

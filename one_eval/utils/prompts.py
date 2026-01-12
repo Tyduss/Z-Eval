@@ -301,3 +301,114 @@ prompt_registry.register(
 }}
 """
 )
+
+# ======================================================
+# BenchConfigRecommend (配置推荐) Prompts
+# ======================================================
+
+prompt_registry.register(
+    "bench_config_recommend.system",
+    """你是一个 HuggingFace 数据集专家。你的任务是根据给定的数据集结构信息，推荐最适合用于“评测（Evaluation）”的配置（Config）和划分（Split）。
+
+请遵循以下规则：
+1. **Split 选择优先级**：
+   - 优先选择名为 `test` 的 split。
+   - 如果没有 `test`，选择包含 `test` 关键词的 split（如 `public_test`, `standard_test`）。
+   - 如果仍没有，选择 `validation`, `dev`, `val`。
+   - 只有在以上都没有时，才选择 `train`（并给出警告）。
+2. **Config/Subset 选择**：
+   - 如果有多个 Config，尝试识别哪个是“主”数据集。
+   - 优先选择 `default`, `main` 等通用名称。
+   - 如果数据集是多任务的（如 MMLU 有多个学科），通常需要选择所有子任务，但在本任务中，为了简化，请推荐一个最具代表性的，或者如果无法确定，推荐列表中的第一个。
+   - 也可以根据 repo_id 的名字来推断（例如 repo 是 `gsm8k`，config 选 `main`）。
+
+输出必须是合法的 JSON 格式，不包含 markdown 代码块。格式如下：
+{{
+    "config": "推荐的config名称",
+    "split": "推荐的split名称",
+    "reason": "推荐理由"
+}}
+"""
+)
+
+prompt_registry.register(
+    "bench_config_recommend.task",
+    """数据集 Repo ID: {repo_id}
+
+结构信息:
+{structure_json}
+
+请给出推荐的下载配置。
+"""
+)
+
+# ======================================================
+# BenchTaskInfer (任务判定) Prompts
+# ======================================================
+
+prompt_registry.register(
+    "bench_task_infer.system",
+    """你是一个评测任务专家。你的任务是根据数据集的名称和字段列表（Keys），判定该数据集属于哪种评测任务类型（eval_type），并给出字段映射（key_mapping）。
+
+支持的 eval_type 及其必要字段如下：
+
+1. **key1_text_score** (文本打分)
+   - 必要映射: `input_text_key`
+   - 示例: WikiText, PTB (Perplexity 任务)
+   - 字段特征: 只有一段文本 text
+
+2. **key2_qa** (生成式：单参考答案)
+   - 必要映射: `input_question_key`, `input_target_key`
+   - 可选映射: `input_context_key`
+   - 示例: GSM8K, MATH (Exact Match)
+   - 字段特征: question, answer/target
+
+3. **key2_q_ma** (生成式：多参考答案)
+   - 必要映射: `input_question_key`, `input_targets_key`
+   - 可选映射: `input_context_key`
+   - 示例: SQuAD (targets 是列表)
+   - 字段特征: question, answers/targets (list)
+
+4. **key3_q_choices_a** (选择题：单正确)
+   - 必要映射: `input_question_key`, `input_choices_key`, `input_label_key`
+   - 可选映射: `input_context_key`
+   - 示例: MMLU, HellaSwag (LogLikelihood)
+   - 字段特征: question, choices, label/answer (idx or char)
+
+5. **key3_q_choices_as** (选择题：多正确)
+   - 必要映射: `input_question_key`, `input_choices_key`, `input_labels_key`
+   - 可选映射: `input_context_key`
+   - 示例: 多选分类
+   - 字段特征: question, choices, labels (list)
+
+6. **key3_q_a_rejected** (偏好/排序：成对比较)
+   - 必要映射: `input_question_key`, `input_better_key`, `input_rejected_key`
+   - 可选映射: `input_context_key`
+   - 示例: DPO 数据
+   - 字段特征: prompt, chosen, rejected
+
+输出必须是合法的 JSON 格式，不包含 markdown 代码块。格式如下：
+{{
+    "eval_type": "keyX_...",
+    "key_mapping": {{
+        "input_question_key": "数据集中的字段名",
+        ...
+    }},
+    "reason": "推断理由"
+}}
+
+注意：
+- 字段名必须完全匹配提供的 Keys 列表。
+- 如果有 `input_context_key`，请尽量映射（通常是 context, passage 等）。
+- 如果无法确定，请根据最可能的类型猜测，并在 reason 中说明。
+"""
+)
+
+prompt_registry.register(
+    "bench_task_infer.task",
+    """数据集名称: {bench_name}
+可用 Keys: {keys}
+
+请判定 eval_type 并给出 key_mapping。
+"""
+)

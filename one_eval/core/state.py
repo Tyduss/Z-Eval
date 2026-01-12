@@ -17,6 +17,27 @@ class BenchInfo:
     dataset_cache: Optional[str] = None
 
     download_status: Optional[str] = None          # "success", "failed", "pending"
+    eval_status: Optional[str] = None              # "success", "failed", "pending"
+
+
+@dataclass
+class ModelConfig:
+    """Configuration for LLM Serving"""
+    model_name_or_path: str
+    is_api: bool = False
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
+    
+    # Generation parameters
+    temperature: float = 0.0
+    top_p: float = 1.0
+    max_tokens: int = 2048
+    
+    # Local model parameters
+    tensor_parallel_size: int = 1
+    max_model_len: Optional[int] = None
+    trust_remote_code: bool = True
+
 
 @dataclass
 class NodeState(MainState):
@@ -32,8 +53,9 @@ class NodeState(MainState):
     task_domain: Optional[str] = None              # "text", "vision", "math" 等
     target_model: Optional[str] = None             # 被测模型名或本地路径
     model_type: Optional[str] = None              # "Qwen", "Llama", "DeepSeek"
+    target_model: Optional[ModelConfig] = None
     # temp: Dict[str, Any] = field(default_factory=dict)  # 临时存储，用于中间结果
-    reference_models: List[str] = field(default_factory=list) # 预留semantic评估接口
+    reference_model: Optional[ModelConfig] = None # 预留semantic评估接口
 
     result: Optional[Dict[str, Any]] = field(default_factory=dict) # 某个agent的输出结果
 
