@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 export interface Bench {
   bench_name: string;
   eval_type?: string;
+  bench_dataflow_eval_type?: string;
   meta?: any;
   eval_status?: string;
   download_status?: string;

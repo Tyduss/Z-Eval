@@ -33,6 +33,10 @@ interface ChatMessage {
 }
 
 export const Eval = () => {
+  const [workMode, setWorkMode] = useState<"agent" | "manual">(() => {
+      const v = localStorage.getItem("oneEval.workMode");
+      return v === "manual" ? "manual" : "agent";
+  });
   const [query, setQuery] = useState("");
   const [threadId, setThreadId] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusResponse["status"]>("idle");
@@ -55,11 +59,19 @@ export const Eval = () => {
   const [evalParams, setEvalParams] = useState({
       temperature: 0.7,
       top_p: 1.0,
-      max_tokens: 2048
+      top_k: -1,
+      repetition_penalty: 1.0,
+      max_tokens: 2048,
+      tensor_parallel_size: 1,
+      max_model_len: 32768,
+      gpu_memory_utilization: 0.9,
+      seed: 0
   });
 
   const [expandedResults, setExpandedResults] = useState<number[]>([]);
   const [selectedModel, setSelectedModel] = useState<any | null>(null);
+  const [manualModelPath, setManualModelPath] = useState<string>("");
+  const [manualBenches, setManualBenches] = useState<Bench[]>([]);
   
   // Chat State
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -71,6 +83,16 @@ export const Eval = () => {
   const [availableModels, setAvailableModels] = useState<any[]>([]);
 
   const apiBaseUrl = useMemo(() => localStorage.getItem("oneEval.apiBaseUrl") || "http://localhost:8000", []);
+
+  useEffect(() => {
+      localStorage.setItem("oneEval.workMode", workMode);
+  }, [workMode]);
+
+  useEffect(() => {
+      if (selectedModel?.path && !manualModelPath) {
+          setManualModelPath(selectedModel.path);
+      }
+  }, [selectedModel?.path]);
   
   // Fetch Models
   useEffect(() => {
@@ -190,7 +212,13 @@ export const Eval = () => {
           setEvalParams({
               temperature: state.target_model.temperature ?? 0.7,
               top_p: state.target_model.top_p ?? 1.0,
-              max_tokens: state.target_model.max_tokens ?? 2048
+              top_k: state.target_model.top_k ?? -1,
+              repetition_penalty: state.target_model.repetition_penalty ?? 1.0,
+              max_tokens: state.target_model.max_tokens ?? 2048,
+              tensor_parallel_size: state.target_model.tensor_parallel_size ?? 1,
+              max_model_len: state.target_model.max_model_len ?? 32768,
+              gpu_memory_utilization: state.target_model.gpu_memory_utilization ?? 0.9,
+              seed: state.target_model.seed ?? 0
           });
       } else if (state.target_model_name && !selectedModel && availableModels.length > 0) {
           const found = availableModels.find(m => m.name === state.target_model_name);
@@ -257,7 +285,18 @@ export const Eval = () => {
           
           const nextModel = selectedModel ?? state?.target_model ?? null;
           const modelForUpdate = nextModel
-              ? { ...nextModel, temperature: evalParams.temperature, top_p: evalParams.top_p, max_tokens: evalParams.max_tokens }
+              ? { 
+                    ...nextModel, 
+                    temperature: evalParams.temperature, 
+                    top_p: evalParams.top_p, 
+                    top_k: evalParams.top_k,
+                    repetition_penalty: evalParams.repetition_penalty,
+                    max_tokens: evalParams.max_tokens,
+                    tensor_parallel_size: evalParams.tensor_parallel_size,
+                    max_model_len: evalParams.max_model_len,
+                    gpu_memory_utilization: evalParams.gpu_memory_utilization,
+                    seed: evalParams.seed
+                }
               : null;
           payload.state_updates = {
               benches: editBenches,
@@ -411,7 +450,18 @@ export const Eval = () => {
       const benchesToSend = (status === "interrupted" ? editBenches : (state?.benches || [])) || [];
       const nextModel = selectedModel ?? state?.target_model ?? null;
       const modelForUpdate = nextModel
-          ? { ...nextModel, temperature: evalParams.temperature, top_p: evalParams.top_p, max_tokens: evalParams.max_tokens }
+          ? { 
+                ...nextModel, 
+                temperature: evalParams.temperature, 
+                top_p: evalParams.top_p, 
+                top_k: evalParams.top_k,
+                repetition_penalty: evalParams.repetition_penalty,
+                max_tokens: evalParams.max_tokens,
+                tensor_parallel_size: evalParams.tensor_parallel_size,
+                max_model_len: evalParams.max_model_len,
+                gpu_memory_utilization: evalParams.gpu_memory_utilization,
+                seed: evalParams.seed
+            }
           : null;
       const stateUpdates: any = {
           benches: benchesToSend,
@@ -426,6 +476,50 @@ export const Eval = () => {
 
       setStatus("running");
       setMessages(prev => [...prev, { id: Date.now().toString(), role: "ai", content: "Re-running execution. Please confirm configuration to start evaluation.", timestamp: Date.now() }]);
+  };
+
+  const handleManualStart = async () => {
+      const targetModelPath = manualModelPath || selectedModel?.path || "";
+      if (!targetModelPath) {
+          setMessages(prev => [...prev, { id: Date.now().toString(), role: "system", content: "Manual mode: please set a model path.", timestamp: Date.now() }]);
+          return;
+      }
+      if (!manualBenches.length) {
+          setMessages(prev => [...prev, { id: Date.now().toString(), role: "system", content: "Manual mode: please add at least one bench.", timestamp: Date.now() }]);
+          return;
+      }
+
+      const benchesPayload = manualBenches.map((b: any) => ({
+          bench_name: b.bench_name,
+          dataset_cache: b.dataset_cache,
+          bench_dataflow_eval_type: b.bench_dataflow_eval_type || b.eval_type,
+          meta: b.meta || {}
+      }));
+
+      const modelPayload: any = {
+          model_name_or_path: targetModelPath,
+          is_api: false,
+          temperature: evalParams.temperature,
+          top_p: evalParams.top_p,
+          top_k: evalParams.top_k,
+          repetition_penalty: evalParams.repetition_penalty,
+          max_tokens: evalParams.max_tokens,
+          tensor_parallel_size: evalParams.tensor_parallel_size,
+          max_model_len: evalParams.max_model_len,
+          gpu_memory_utilization: evalParams.gpu_memory_utilization,
+          seed: evalParams.seed
+      };
+
+      const res = await axios.post(`${apiBaseUrl}/api/workflow/manual_start`, {
+          user_query: query || "manual eval",
+          target_model_name: selectedModel?.name || "manual",
+          target_model: modelPayload,
+          benches: benchesPayload
+      });
+
+      setThreadId(res.data.thread_id);
+      setStatus("running");
+      setMessages(prev => [...prev, { id: Date.now().toString(), role: "ai", content: "Manual evaluation started. Running DataFlowEval...", timestamp: Date.now() }]);
   };
   
   // Helper to determine block status
@@ -600,6 +694,25 @@ export const Eval = () => {
              </div>
              
              <div className="flex items-center gap-3">
+                 <div className="flex items-center gap-2">
+                     <span className="text-xs font-bold text-slate-500">Agent</span>
+                     <button
+                         type="button"
+                         onClick={() => setWorkMode(workMode === "agent" ? "manual" : "agent")}
+                         className={cn(
+                             "w-12 h-6 rounded-full relative transition-colors border",
+                             workMode === "manual" ? "bg-emerald-500 border-emerald-600" : "bg-slate-200 border-slate-300"
+                         )}
+                     >
+                         <span
+                             className={cn(
+                                 "absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all",
+                                 workMode === "manual" ? "left-6" : "left-0.5"
+                             )}
+                         />
+                     </button>
+                     <span className="text-xs font-bold text-slate-500">Manual</span>
+                 </div>
                  <Button variant="outline" size="sm" className="gap-2">
                      <Database className="w-4 h-4" /> Benches
                  </Button>
@@ -616,6 +729,12 @@ export const Eval = () => {
                         "gap-2 transition-all",
                         status === "running" ? "bg-red-500 hover:bg-red-600" : "bg-blue-600 hover:bg-blue-700"
                     )}
+                    onClick={() => {
+                        if (status === "running") return;
+                        if (workMode === "manual") {
+                            handleManualStart();
+                        }
+                    }}
                  >
                      {status === "running" ? <><X className="w-4 h-4" /> Stop</> : <><Play className="w-4 h-4" /> Run</>}
                  </Button>
@@ -624,6 +743,298 @@ export const Eval = () => {
 
            {/* Blocks Canvas */}
            <main className="flex-1 overflow-y-auto p-8 pb-32 scroll-smooth">
+               {workMode === "manual" ? (
+                   <div className="max-w-5xl mx-auto space-y-6">
+                       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6">
+                           <div className="flex items-center justify-between gap-4">
+                               <div>
+                                   <div className="text-sm font-bold text-slate-900">Manual Evaluation</div>
+                                   <div className="text-xs text-slate-500">Configure model and benches, then run DataFlowEval directly.</div>
+                               </div>
+                               <Button
+                                   className="gap-2 bg-blue-600 hover:bg-blue-700"
+                                   disabled={status === "running"}
+                                   onClick={handleManualStart}
+                               >
+                                   <Play className="w-4 h-4" /> Run
+                               </Button>
+                           </div>
+                       </div>
+
+                       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 space-y-4">
+                           <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Model</div>
+                           <div className="grid grid-cols-12 gap-4">
+                               <div className="col-span-6">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Model Preset</label>
+                                   <select
+                                       value={(selectedModel?.name ?? state?.target_model_name ?? "") as any}
+                                       onChange={(e) => {
+                                           const found = availableModels.find((m: any) => m?.name === e.target.value);
+                                           if (found) setSelectedModel(found);
+                                       }}
+                                       disabled={status === "running"}
+                                       className="w-full h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all disabled:opacity-50 disabled:bg-slate-50/50"
+                                   >
+                                       {availableModels.map((m: any) => (
+                                           <option key={m.name} value={m.name}>{m.name}</option>
+                                       ))}
+                                   </select>
+                               </div>
+                               <div className="col-span-6">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Model Path</label>
+                                   <Input
+                                       value={manualModelPath}
+                                       onChange={(e) => setManualModelPath(e.target.value)}
+                                       disabled={status === "running"}
+                                       className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                   />
+                               </div>
+                           </div>
+                       </div>
+
+                       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 space-y-4">
+                           <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Generation</div>
+                           <div className="grid grid-cols-12 gap-x-4 gap-y-4">
+                               <div className="col-span-3 min-w-0">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Temperature</label>
+                                   <Input
+                                       type="number"
+                                       step="0.1"
+                                       min="0"
+                                       max="2"
+                                       value={evalParams.temperature}
+                                       onChange={e => setEvalParams({ ...evalParams, temperature: parseFloat(e.target.value) || 0 })}
+                                       disabled={status === "running"}
+                                       className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                   />
+                               </div>
+                               <div className="col-span-3 min-w-0">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Top P</label>
+                                   <Input
+                                       type="number"
+                                       step="0.05"
+                                       min="0"
+                                       max="1"
+                                       value={evalParams.top_p}
+                                       onChange={e => setEvalParams({ ...evalParams, top_p: parseFloat(e.target.value) || 0 })}
+                                       disabled={status === "running"}
+                                       className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                   />
+                               </div>
+                               <div className="col-span-3 min-w-0">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Top K</label>
+                                   <Input
+                                       type="number"
+                                       step="1"
+                                       value={evalParams.top_k}
+                                       onChange={e => setEvalParams({ ...evalParams, top_k: parseInt(e.target.value) || 0 })}
+                                       disabled={status === "running"}
+                                       className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                   />
+                               </div>
+                               <div className="col-span-3 min-w-0">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Repetition</label>
+                                   <Input
+                                       type="number"
+                                       step="0.05"
+                                       min="0.5"
+                                       max="2"
+                                       value={evalParams.repetition_penalty}
+                                       onChange={e => setEvalParams({ ...evalParams, repetition_penalty: parseFloat(e.target.value) || 1 })}
+                                       disabled={status === "running"}
+                                       className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                   />
+                               </div>
+
+                               <div className="col-span-4 min-w-0">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Max Tokens</label>
+                                   <Input
+                                       type="number"
+                                       step="128"
+                                       value={evalParams.max_tokens}
+                                       onChange={e => setEvalParams({ ...evalParams, max_tokens: parseInt(e.target.value) || 0 })}
+                                       disabled={status === "running"}
+                                       className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                   />
+                               </div>
+                               <div className="col-span-4 min-w-0">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Tensor Parallel</label>
+                                   <Input
+                                       type="number"
+                                       step="1"
+                                       min="1"
+                                       value={evalParams.tensor_parallel_size}
+                                       onChange={e => setEvalParams({ ...evalParams, tensor_parallel_size: parseInt(e.target.value) || 1 })}
+                                       disabled={status === "running"}
+                                       className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                   />
+                               </div>
+                               <div className="col-span-4 min-w-0">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">GPU Mem Util</label>
+                                   <Input
+                                       type="number"
+                                       step="0.05"
+                                       min="0.1"
+                                       max="1"
+                                       value={evalParams.gpu_memory_utilization}
+                                       onChange={e => setEvalParams({ ...evalParams, gpu_memory_utilization: parseFloat(e.target.value) || 0.9 })}
+                                       disabled={status === "running"}
+                                       className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                   />
+                               </div>
+                               <div className="col-span-6 min-w-0">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Max Model Len</label>
+                                   <Input
+                                       type="number"
+                                       step="1024"
+                                       value={evalParams.max_model_len}
+                                       onChange={e => setEvalParams({ ...evalParams, max_model_len: parseInt(e.target.value) || 0 })}
+                                       disabled={status === "running"}
+                                       className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                   />
+                               </div>
+                               <div className="col-span-6 min-w-0">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Seed</label>
+                                   <Input
+                                       type="number"
+                                       step="1"
+                                       value={evalParams.seed}
+                                       onChange={e => setEvalParams({ ...evalParams, seed: parseInt(e.target.value) || 0 })}
+                                       disabled={status === "running"}
+                                       className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                   />
+                               </div>
+                           </div>
+                       </div>
+
+                       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 space-y-4">
+                           <div className="flex items-center justify-between">
+                               <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Benches</div>
+                               <Button
+                                   size="sm"
+                                   variant="outline"
+                                   className="gap-2"
+                                   disabled={status === "running"}
+                                   onClick={() => setManualBenches(prev => ([...prev, { bench_name: "", bench_dataflow_eval_type: "", dataset_cache: "", meta: {} } as any]))}
+                               >
+                                   <Plus className="w-4 h-4" /> Add Bench
+                               </Button>
+                           </div>
+
+                           <div className="space-y-3">
+                               {manualBenches.map((b: any, i: number) => (
+                                   <div key={i} className="border border-slate-100 rounded-xl p-4 bg-slate-50/30">
+                                       <div className="flex justify-between items-center mb-3">
+                                           <div className="text-sm font-bold text-slate-700">Bench #{i + 1}</div>
+                                           <Button
+                                               size="sm"
+                                               variant="ghost"
+                                               className="h-7 px-2 text-slate-400 hover:text-red-500 hover:bg-red-50"
+                                               disabled={status === "running"}
+                                               onClick={() => setManualBenches(prev => prev.filter((_, idx) => idx !== i))}
+                                           >
+                                               <Trash2 className="w-4 h-4" />
+                                           </Button>
+                                       </div>
+
+                                       <div className="grid grid-cols-12 gap-4">
+                                           <div className="col-span-4">
+                                               <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Bench Name</label>
+                                               <Input
+                                                   value={b.bench_name || ""}
+                                                   onChange={(e) => setManualBenches(prev => prev.map((x, idx) => idx === i ? { ...x, bench_name: e.target.value } : x))}
+                                                   disabled={status === "running"}
+                                                   className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                               />
+                                           </div>
+                                           <div className="col-span-4">
+                                               <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Eval Type</label>
+                                               <Input
+                                                   value={b.bench_dataflow_eval_type || ""}
+                                                   onChange={(e) => setManualBenches(prev => prev.map((x, idx) => idx === i ? { ...x, bench_dataflow_eval_type: e.target.value } : x))}
+                                                   disabled={status === "running"}
+                                                   className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                               />
+                                           </div>
+                                           <div className="col-span-4">
+                                               <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Dataset Cache</label>
+                                               <Input
+                                                   value={b.dataset_cache || ""}
+                                                   onChange={(e) => setManualBenches(prev => prev.map((x, idx) => idx === i ? { ...x, dataset_cache: e.target.value } : x))}
+                                                   disabled={status === "running"}
+                                                   className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                               />
+                                           </div>
+
+                                           <div className="col-span-12">
+                                               <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Key Mapping (JSON)</label>
+                                               <textarea
+                                                   value={b.meta?.key_mapping_text ?? (b.meta?.key_mapping ? JSON.stringify(b.meta.key_mapping, null, 2) : "")}
+                                                   onChange={(e) => {
+                                                       const text = e.target.value;
+                                                       setManualBenches(prev => prev.map((x, idx) => {
+                                                           if (idx !== i) return x;
+                                                           const nextMeta = { ...(x.meta || {}) };
+                                                           nextMeta.key_mapping_text = text;
+                                                           try {
+                                                               nextMeta.key_mapping = JSON.parse(text);
+                                                           } catch {}
+                                                           return { ...x, meta: nextMeta };
+                                                       }));
+                                                   }}
+                                                   disabled={status === "running"}
+                                                   className="w-full min-h-[96px] p-3 bg-white rounded-lg border border-slate-200 text-xs font-mono text-slate-800 shadow-inner resize-y focus:outline-none focus:ring-2 focus:ring-blue-500/20 disabled:opacity-50 disabled:bg-slate-50/50"
+                                               />
+                                           </div>
+                                       </div>
+                                   </div>
+                               ))}
+                               {!manualBenches.length && (
+                                   <div className="py-10 flex flex-col items-center justify-center text-slate-300 border-2 border-dashed border-slate-100 rounded-xl">
+                                       <Database className="w-8 h-8 mb-2 opacity-50" />
+                                       <span className="text-sm">Add benches to start manual evaluation</span>
+                                   </div>
+                               )}
+                           </div>
+                       </div>
+
+                       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 space-y-4">
+                           <div className="flex items-center justify-between">
+                               <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Progress</div>
+                               {threadId && (
+                                   <div className="text-[10px] text-slate-400 font-mono">thread: {threadId.slice(0, 8)}</div>
+                               )}
+                           </div>
+                           {state?.benches?.length ? (
+                               <div className="space-y-2">
+                                   {state.benches.map((b: any, i: number) => (
+                                       <div key={i} className="p-3 rounded-lg border border-slate-100 bg-slate-50/40 flex items-center justify-between">
+                                           <div className="min-w-0">
+                                               <div className="text-sm font-bold text-slate-700 truncate">{b.bench_name}</div>
+                                               {b.eval_status === "running" && (
+                                                   <div className="mt-2 h-1.5 w-56 bg-slate-100 rounded-full overflow-hidden">
+                                                       <div className="h-full w-1/2 bg-blue-500/70 rounded-full animate-pulse" />
+                                                   </div>
+                                               )}
+                                           </div>
+                                           <span className={cn(
+                                               "text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider shrink-0",
+                                               b.eval_status === "success" ? "bg-emerald-50 text-emerald-700 border border-emerald-100" :
+                                               b.eval_status === "running" ? "bg-blue-50 text-blue-700 border border-blue-100" :
+                                               b.eval_status === "failed" ? "bg-red-50 text-red-700 border border-red-100" :
+                                               "bg-slate-50 text-slate-500 border border-slate-100"
+                                           )}>
+                                               {b.eval_status || "pending"}
+                                           </span>
+                                       </div>
+                                   ))}
+                               </div>
+                           ) : (
+                               <div className="text-sm text-slate-400 italic">No running session yet.</div>
+                           )}
+                       </div>
+                   </div>
+               ) : (
                <div className="max-w-5xl mx-auto space-y-12">
                    
                    {/* Block 1: Discovery */}
@@ -825,8 +1236,19 @@ export const Eval = () => {
                                    : "border-emerald-100"
                            )}>
                                <div className="flex justify-between items-center">
-                                   <div className="flex items-center gap-2 text-emerald-800 font-bold text-sm">
-                                       <Settings className="w-4 h-4" /> Evaluation Configuration
+                                   <div className="flex items-center gap-3">
+                                       <div className="flex items-center gap-2 text-emerald-800 font-bold text-sm">
+                                           <Settings className="w-4 h-4" /> Evaluation Configuration
+                                       </div>
+                                       {state?.benches?.length ? (
+                                           <div className="text-[10px] font-bold text-slate-500 bg-white/70 border border-emerald-100 px-2 py-1 rounded">
+                                               {(() => {
+                                                   const total = state.benches.length;
+                                                   const done = state.benches.filter((b: any) => b.eval_status === "success" || b.eval_status === "failed").length;
+                                                   return `${done}/${total} done`;
+                                               })()}
+                                           </div>
+                                       ) : null}
                                    </div>
                                    
                                    <div className="flex items-center gap-2">
@@ -873,7 +1295,7 @@ export const Eval = () => {
                                        )}
                                    </div>
                                    
-                                   <div className="col-span-4 min-w-0">
+                                   <div className="col-span-3 min-w-0">
                                        <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Temperature</label>
                                        <Input 
                                            type="number" 
@@ -887,7 +1309,7 @@ export const Eval = () => {
                                        />
                                    </div>
                                    
-                                   <div className="col-span-4 min-w-0">
+                                   <div className="col-span-3 min-w-0">
                                        <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Top P</label>
                                        <Input 
                                            type="number" 
@@ -901,6 +1323,32 @@ export const Eval = () => {
                                        />
                                    </div>
                                    
+                                   <div className="col-span-3 min-w-0">
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Top K</label>
+                                       <Input 
+                                           type="number" 
+                                           step="1"
+                                           value={evalParams.top_k} 
+                                           onChange={e => setEvalParams({...evalParams, top_k: parseInt(e.target.value) || 0})}
+                                           disabled={status === "running"}
+                                           className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                       />
+                                   </div>
+
+                                   <div className="col-span-3 min-w-0">
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Repetition</label>
+                                       <Input 
+                                           type="number" 
+                                           step="0.05"
+                                           min="0.5"
+                                           max="2"
+                                           value={evalParams.repetition_penalty} 
+                                           onChange={e => setEvalParams({...evalParams, repetition_penalty: parseFloat(e.target.value) || 1})}
+                                           disabled={status === "running"}
+                                           className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                       />
+                                   </div>
+
                                    <div className="col-span-4 min-w-0">
                                        <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Max Tokens</label>
                                        <Input 
@@ -908,6 +1356,57 @@ export const Eval = () => {
                                            step="128"
                                            value={evalParams.max_tokens} 
                                            onChange={e => setEvalParams({...evalParams, max_tokens: parseInt(e.target.value) || 0})}
+                                           disabled={status === "running"}
+                                           className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                       />
+                                   </div>
+
+                                   <div className="col-span-4 min-w-0">
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Tensor Parallel</label>
+                                       <Input 
+                                           type="number" 
+                                           step="1"
+                                           min="1"
+                                           value={evalParams.tensor_parallel_size} 
+                                           onChange={e => setEvalParams({...evalParams, tensor_parallel_size: parseInt(e.target.value) || 1})}
+                                           disabled={status === "running"}
+                                           className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                       />
+                                   </div>
+
+                                   <div className="col-span-4 min-w-0">
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">GPU Mem Util</label>
+                                       <Input 
+                                           type="number" 
+                                           step="0.05"
+                                           min="0.1"
+                                           max="1"
+                                           value={evalParams.gpu_memory_utilization} 
+                                           onChange={e => setEvalParams({...evalParams, gpu_memory_utilization: parseFloat(e.target.value) || 0.9})}
+                                           disabled={status === "running"}
+                                           className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                       />
+                                   </div>
+
+                                   <div className="col-span-6 min-w-0">
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Max Model Len</label>
+                                       <Input 
+                                           type="number" 
+                                           step="1024"
+                                           value={evalParams.max_model_len} 
+                                           onChange={e => setEvalParams({...evalParams, max_model_len: parseInt(e.target.value) || 0})}
+                                           disabled={status === "running"}
+                                           className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                       />
+                                   </div>
+
+                                   <div className="col-span-6 min-w-0">
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Seed</label>
+                                       <Input 
+                                           type="number" 
+                                           step="1"
+                                           value={evalParams.seed} 
+                                           onChange={e => setEvalParams({...evalParams, seed: parseInt(e.target.value) || 0})}
                                            disabled={status === "running"}
                                            className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
                                        />
@@ -945,14 +1444,33 @@ export const Eval = () => {
                                                <div className="flex items-center gap-3">
                                                    <div className={cn(
                                                        "w-2 h-8 rounded-full transition-colors",
-                                                       b.eval_status === "success" ? "bg-emerald-500" : "bg-slate-200"
+                                                       b.eval_status === "success" ? "bg-emerald-500" :
+                                                       b.eval_status === "running" ? "bg-blue-500 animate-pulse" :
+                                                       b.eval_status === "failed" ? "bg-red-500" :
+                                                       "bg-slate-200"
                                                    )} />
                                                    <div>
-                                                       <div className="text-sm font-bold text-slate-700">{b.bench_name}</div>
+                                                       <div className="flex items-center gap-2">
+                                                           <div className="text-sm font-bold text-slate-700">{b.bench_name}</div>
+                                                           <span className={cn(
+                                                               "text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider",
+                                                               b.eval_status === "success" ? "bg-emerald-50 text-emerald-700 border border-emerald-100" :
+                                                               b.eval_status === "running" ? "bg-blue-50 text-blue-700 border border-blue-100" :
+                                                               b.eval_status === "failed" ? "bg-red-50 text-red-700 border border-red-100" :
+                                                               "bg-slate-50 text-slate-500 border border-slate-100"
+                                                           )}>
+                                                               {b.eval_status || "pending"}
+                                                           </span>
+                                                       </div>
                                                        <div className="text-[10px] text-slate-400 flex items-center gap-2">
                                                            {b.download_status === "success" && <span className="flex items-center gap-1"><Database className="w-3 h-3" /> Ready</span>}
                                                            {b.eval_status === "success" && <span className="flex items-center gap-1 text-emerald-600"><Check className="w-3 h-3" /> Evaluated</span>}
                                                        </div>
+                                                       {b.eval_status === "running" && (
+                                                           <div className="mt-2 h-1.5 w-56 bg-slate-100 rounded-full overflow-hidden">
+                                                               <div className="h-full w-1/2 bg-blue-500/70 rounded-full animate-pulse" />
+                                                           </div>
+                                                       )}
                                                    </div>
                                                </div>
                                                
@@ -995,6 +1513,11 @@ export const Eval = () => {
                                                            </div>
                                                        </div>
                                                    </div>
+                                                   {b.eval_status === "failed" && b.meta?.eval_error && (
+                                                       <div className="mt-4 p-3 bg-red-50/50 rounded-lg border border-red-100 text-xs text-red-700 font-mono whitespace-pre-wrap">
+                                                           {String(b.meta.eval_error)}
+                                                       </div>
+                                                   )}
                                                </div>
                                            )}
                                        </div>
@@ -1033,7 +1556,8 @@ export const Eval = () => {
                        </div>
                    </WorkflowBlock>
 
-               </div>
+              </div>
+               )}
            </main>
            
            {/* Bottom Summary Panel */}
