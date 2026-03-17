@@ -2,17 +2,22 @@
   <!-- TODO: Add Project Logo Here -->
   <img src="./static/logo/logo.png" width="360" alt="One-Eval Logo" />
 
-[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-Apache_2.0-2F80ED?style=flat-square&logo=apache&logoColor=white)](./LICENSE)
-[![Repo Size](https://img.shields.io/github/repo-size/OpenDCAI/One-Eval?color=green)](https://github.com/OpenDCAI/One-Eval)
-[![ArXiv](https://img.shields.io/badge/ArXiv-Paper-b31b1b.svg?logo=arxiv)](https://arxiv.org/abs/2603.09821)
+  <h4 align="center">
+    <i>✨ One Eval, Evaluation in One ✨</i>
+  </h4>
+  <br>
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/OpenDCAI/One-Eval)
-[![WeChat Group](https://img.shields.io/badge/WeChat-Group-brightgreen?logo=wechat&logoColor=white)](./static/logo/318QRcode.jpg)
+[!\[Python\](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square\&logo=python\&logoColor=white null)](https://www.python.org/)
+[!\[License\](https://img.shields.io/badge/License-Apache\_2.0-2F80ED?style=flat-square\&logo=apache\&logoColor=white null)](./LICENSE)
+[!\[Repo Size\](https://img.shields.io/github/repo-size/OpenDCAI/One-Eval?color=green null)](https://github.com/OpenDCAI/One-Eval)
+[!\[ArXiv\](https://img.shields.io/badge/ArXiv-Paper-b31b1b.svg?logo=arxiv null)](https://arxiv.org/abs/2603.09821)
+
+[!\[Ask DeepWiki\](https://deepwiki.com/badge.svg null)](https://deepwiki.com/OpenDCAI/One-Eval)
+[!\[WeChat Group\](https://img.shields.io/badge/WeChat-Group-brightgreen?logo=wechat\&logoColor=white null)](./static/logo/318QRcode.jpg)
 
 </div>
 
-One-Eval is an automated Agent-based evaluation framework for Large Language Models, designed to achieve **NL2Eval**: automatically orchestrating evaluation workflows and generating reports from natural language requirements.  
+One-Eval is an automated Agent-based evaluation framework for Large Language Models, designed to achieve **NL2Eval**: automatically orchestrating evaluation workflows and generating reports from natural language requirements.\
 Built on [DataFlow](https://github.com/OpenDCAI/DataFlow) and [LangGraph](https://github.com/langchain-ai/langgraph), it emphasizes a traceable, interruptible, and scalable evaluation loop.
 
 English | [简体中文](./README_zh.md)
@@ -23,12 +28,12 @@ English | [简体中文](./README_zh.md)
 
 ## 📰 1. News
 
-- **[2026-03] 🎉 One-Eval (v0.1.0) is officially open-sourced!**  
+- **\[2026-03] 🎉 One-Eval (v0.1.0) is officially open-sourced!**\
   We released the first version, supporting full-link automation from natural language to evaluation reports (NL2Eval). Say goodbye to tedious manual scripts and make LLM evaluation as simple, intuitive, and controllable as chatting. Welcome to Star 🌟 and follow!
 
 ## 💡 Why One-Eval?
 
-Traditional evaluation frameworks often require users to manually search for benchmarks, download data, and fill in extensive configuration parameters.  
+Traditional evaluation frameworks often require users to manually search for benchmarks, download data, and fill in extensive configuration parameters.\
 **One-Eval** aims to change this: **Everything that can be automated is handled by the Agent**. From benchmark recommendation to model evaluation, we are committed to providing the most direct and intuitive evaluation experience.
 
 ## 🔍 2. Overview
@@ -41,7 +46,8 @@ Traditional evaluation often faces pain points such as complex scripts, fragment
 - 📊 **Scalable Architecture**: Based on the DataFlow operator system and LangGraph state management, it easily integrates private datasets and custom metrics.
 
 <!-- TODO: Add One-Eval Framework Diagram Here -->
-![One-Eval Framework](./static/logo/eval_framework.png)
+
+!\[One-Eval Framework]\(./static/logo/eval\_framework.png null)
 
 ## ⚡ 3. Quick Start
 
@@ -50,6 +56,7 @@ Traditional evaluation often faces pain points such as complex scripts, fragment
 We provide two environment management methods: Conda and uv. Choose one to get started quickly:
 
 #### Option A: Conda
+
 ```bash
 conda create -n one-eval python=3.11 -y
 conda activate one-eval
@@ -57,6 +64,7 @@ pip install -e .
 ```
 
 #### Option B: uv
+
 ```bash
 uv venv
 uv pip install -e .
@@ -67,23 +75,27 @@ uv pip install -e .
 One-Eval adopts a separation of frontend and backend architecture. Please start the backend API and frontend interface respectively.
 
 #### ① Start Backend (FastAPI)
+
 ```bash
 uvicorn one_eval.server.app:app --host 0.0.0.0 --port 8000
 ```
 
 #### ② Start Frontend (Vite + React)
+
 ```bash
 cd one-eval-web
 npm install
 npm run dev
 ```
-Visit http://localhost:5173 to start interactive evaluation.
+
+Visit <http://localhost:5173> to start interactive evaluation.
+
 > Note: After starting, please enter the settings interface first to configure parameters such as API, model, and HF Token (to support batch data download), and click save.
 
 ### 3.3 Minimal Code Mode (Developer Mode)
 
-If you prefer to call directly in code, you can run the built-in complete workflow example:  
-[workflow_all.py](./one_eval/graph/workflow_all.py)
+If you prefer to call directly in code, you can run the built-in complete workflow example:\
+[workflow\_all.py](./one_eval/graph/workflow_all.py)
 
 ```bash
 # Example: Initiate a reasoning capability evaluation directly via command line
@@ -97,13 +109,24 @@ This Graph demonstrates the complete closed loop from Query parsing to report ge
 One-Eval has a built-in rich **Bench Gallery** for unified management of meta-information of various evaluation benchmarks (such as task type, data format, Prompt template).
 
 > Currently covering mainstream text-only capability dimensions (no complex sandbox environment required):
+>
 > - 🧮 **Reasoning**: MATH, GSM8K, BBH, AIME...
 > - 🌐 **General Knowledge**: MMLU, CEval, CMMLU...
 > - 🔧 **Instruction Following**: IFEval...
 
-![Bench Gallery](./static/logo/gallery.png)
+!\[Bench Gallery]\(./static/logo/gallery.png null)
 
-## 📮 5. Contact & Citation
+## � 5. Future Work
+
+We plan to continuously maintain and update One-Eval in the following directions:
+
+- 💻 **Support for Complex Evaluation Scenarios**: Extend support for LLM evaluation fields that require additional execution environments, such as Code and Text2SQL.
+- 🤖 **Agentic Evaluation & Sandbox Environments**: Support evaluation in Agentic domains (e.g., SWE-bench) that rely on complex sandbox environments.
+- 🌐 **Online Community & Platform**: Deploy an online evaluation platform where users can discuss, build, share, and use their own custom benchmarks.
+
+🙌 **Join Us**: We warmly welcome co-workers to join our open-source project! Feel free to contact us directly for co-development. We highly support contributors in exploring different directions and achieving their own outputs (e.g., collaborating on paper submissions).
+
+## �📮 6. Contact & Citation
 
 If you are interested in this project, or have any questions or suggestions, please contact us via Issue or join our WeChat group.
 
@@ -118,6 +141,7 @@ If you are interested in this project, or have any questions or suggestions, ple
 If you use One-Eval in your research, please cite our work:
 
 ## Citation
+
 ```bibtex
 @misc{shen2026oneevalagenticautomatedtraceable,
       title={One-Eval: An Agentic System for Automated and Traceable LLM Evaluation}, 
@@ -136,3 +160,4 @@ If you use One-Eval in your research, please cite our work:
   year={2025}
 }
 ```
+
