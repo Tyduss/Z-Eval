@@ -159,3 +159,10 @@ If you are interested in this project, or have any questions or suggestions, ple
 }
 ```
 
+<br>
+
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/c336e460-b782-49a4-95b2-849b6d479334" height="40" alt="Partner 1" style="margin: 0 15px;" />
+  <img src="https://github.com/user-attachments/assets/2ec354ff-7b40-47dd-b8e2-c38e7169078b" height="40" alt="Partner 2" style="margin: 0 15px;" />
+  <!-- To add more partners, just insert new img tags here and keep the height consistent for horizontal scaling -->
+</div>
