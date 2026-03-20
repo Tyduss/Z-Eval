@@ -483,6 +483,10 @@ class StartWorkflowRequest(BaseModel):
     repetition_penalty: float = 1.0
     max_model_len: Optional[int] = None
     gpu_memory_utilization: float = 0.9
+    # API model support
+    is_api: bool = False
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
 
 class ResumeWorkflowRequest(BaseModel):
     thread_id: str
@@ -547,6 +551,9 @@ async def start_workflow(req: StartWorkflowRequest):
         hf_count=req.hf_count,
         target_model=ModelConfig(
             model_name_or_path=req.target_model_path,
+            is_api=req.is_api,
+            api_url=req.api_url,
+            api_key=req.api_key,
             tensor_parallel_size=req.tensor_parallel_size,
             max_tokens=req.max_tokens,
             temperature=req.temperature,
@@ -1348,6 +1355,73 @@ def add_model(model: Dict[str, Any]):
     models.append(model)
     _write_json_file(MODELS_FILE, models)
     return {"status": "success"}
+
+@app.delete("/api/models/{index}")
+def delete_model(index: int):
+    models = _load_json_file(MODELS_FILE, default=[])
+    if not isinstance(models, list):
+        models = []
+    if 0 <= index < len(models):
+        models.pop(index)
+        _write_json_file(MODELS_FILE, models)
+        return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Model not found")
+
+class ModelTestRequest(BaseModel):
+    is_api: bool = False
+    path: Optional[str] = None
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
+
+@app.post("/api/models/test")
+def test_model(req: ModelTestRequest):
+    """Test model connection - either API or local path"""
+    if req.is_api:
+        # Test API connection
+        if not req.api_url or not req.path:
+            raise HTTPException(status_code=400, detail="api_url and path (model name) are required for API models")
+
+        base_url = _normalize_openai_base_url(req.api_url.strip())
+        headers = {"Content-Type": "application/json"}
+        if req.api_key and req.api_key.strip():
+            headers["Authorization"] = f"Bearer {req.api_key.strip()}"
+
+        payload = {
+            "model": req.path.strip(),
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 5,
+        }
+
+        try:
+            import httpx
+            with httpx.Client(timeout=30.0) as client:
+                r = client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
+                if 200 <= r.status_code < 300:
+                    return {"ok": True, "detail": "API connection successful"}
+                try:
+                    err_detail = r.json()
+                except:
+                    err_detail = r.text[:200]
+                return {"ok": False, "detail": f"API returned {r.status_code}: {err_detail}"}
+        except Exception as e:
+            return {"ok": False, "detail": str(e)}
+    else:
+        # Test local model path
+        if not req.path:
+            raise HTTPException(status_code=400, detail="path is required for local models")
+
+        raw = req.path.strip()
+        resolved = _normalize_model_path_for_host(raw)
+        exists_local = Path(resolved).exists()
+
+        if not exists_local:
+            # Check if it's a HuggingFace ID (contains "/" but doesn't start with "/" or "/mnt/")
+            if "/" in raw and not raw.startswith("/") and not raw.startswith("\\"):
+                # Assume it's a valid HF ID, we can't really test without downloading
+                return {"ok": True, "detail": f"HuggingFace ID detected: {raw}"}
+            raise HTTPException(status_code=400, detail=f"Model path not found: {resolved}")
+
+        return {"ok": True, "detail": f"Local path exists: {resolved}"}
 
 class ModelLoadTestRequest(BaseModel):
     model_path: str

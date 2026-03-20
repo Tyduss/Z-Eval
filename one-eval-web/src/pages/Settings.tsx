@@ -14,6 +14,9 @@ import { useLang } from "@/lib/i18n";
 interface ModelConfig {
   name: string;
   path: string;
+  is_api?: boolean;
+  api_url?: string;
+  api_key?: string;
 }
 
 interface SettingsCardProps {
@@ -80,7 +83,7 @@ export const Settings = () => {
   const { lang } = useLang();
   const tt = (zh: string, en: string) => (lang === "zh" ? zh : en);
   const [models, setModels] = useState<ModelConfig[]>([]);
-  const [newModel, setNewModel] = useState({ name: "", path: "" });
+  const [newModel, setNewModel] = useState<ModelConfig>({ name: "", path: "", is_api: false, api_url: "", api_key: "" });
   const [loading, setLoading] = useState(false);
   const [apiBaseUrl] = useState(() => localStorage.getItem("oneEval.apiBaseUrl") || "http://localhost:8000");
   const [hfEndpoint, setHfEndpoint] = useState("https://hf-mirror.com");
@@ -290,23 +293,54 @@ export const Settings = () => {
     setTestingAgent(false);
   };
 
-  const handleTestModelLoad = async (modelPath: string) => {
-    const path = (modelPath || "").trim();
-    if (!path) return;
-    setTestingModelPath(path);
-    setModelTestMsg((prev) => ({ ...prev, [path]: tt("测试中...", "Testing...") }));
+  const getModelTestKey = (model: ModelConfig) => {
+    if (model.is_api) {
+      return `api:${model.api_url}:${model.path}`;
+    }
+    return `local:${model.path}`;
+  };
+
+  const canTestModel = (model: ModelConfig) => {
+    if (model.is_api) {
+      return (model.api_url || "").trim() && (model.path || "").trim();
+    }
+    return (model.path || "").trim();
+  };
+
+  const canSaveModel = (model: ModelConfig) => {
+    return (model.name || "").trim() && canTestModel(model);
+  };
+
+  const handleTestModel = async (model: ModelConfig) => {
+    const key = getModelTestKey(model);
+    setTestingModelPath(key);
+    setModelTestMsg((prev) => ({ ...prev, [key]: tt("测试中...", "Testing...") }));
     try {
-      const res = await axios.post(`${apiBaseUrl}/api/models/test_load`, { model_path: path });
+      const res = await axios.post(`${apiBaseUrl}/api/models/test`, {
+        is_api: model.is_api,
+        path: model.path,
+        api_url: model.api_url,
+        api_key: model.api_key,
+      });
       const ok = !!res.data?.ok;
       setModelTestMsg((prev) => ({
         ...prev,
-        [path]: ok ? tt("加载成功", "Load passed") : tt("加载失败", "Load failed"),
+        [key]: ok ? tt("连接成功", "Connection OK") : `${tt("失败", "Failed")}: ${res.data?.detail || ""}`,
       }));
     } catch (e: any) {
       const detail = e?.response?.data?.detail || tt("请求异常", "request error");
-      setModelTestMsg((prev) => ({ ...prev, [path]: `${tt("加载失败", "Load failed")}: ${detail}` }));
+      setModelTestMsg((prev) => ({ ...prev, [key]: `${tt("失败", "Failed")}: ${detail}` }));
     }
     setTestingModelPath(null);
+  };
+
+  const handleDeleteModel = async (index: number) => {
+    try {
+      await axios.delete(`${apiBaseUrl}/api/models/${index}`);
+      setModels(models.filter((_, i) => i !== index));
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   return (
@@ -329,7 +363,7 @@ export const Settings = () => {
         >
           <div className="space-y-6">
             <div className="space-y-2">
-              <Label>{tt("服务地址", "Provider URL")}</Label>
+              <Label>{tt("服务地址（必填）", "Provider URL (Required)")}</Label>
               <div className="grid grid-cols-1 gap-2">
                 <select
                   value={agentUrlPresetValue}
@@ -348,14 +382,14 @@ export const Settings = () => {
                 <Input
                   value={agentBaseUrl}
                   onChange={(e) => setAgentBaseUrl(e.target.value)}
-                  placeholder={tt("https://.../v1 或 https://.../v1/chat/completions", "https://.../v1  or  https://.../v1/chat/completions")}
+                  placeholder={tt("例如：https://api.openai.com/v1", "e.g. https://api.openai.com/v1")}
                 />
               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label>{tt("模型", "Model")}</Label>
+                <Label>{tt("模型（必填）", "Model (Required)")}</Label>
                 <Input
                   value={agentModel}
                   onChange={(e) => setAgentModel(e.target.value)}
@@ -372,11 +406,12 @@ export const Settings = () => {
                 </datalist>
               </div>
               <div className="space-y-2">
-                <Label>{tt("超时（秒）", "Timeout (s)")}</Label>
+                <Label>{tt("超时秒数（可选）", "Timeout in seconds (Optional)")}</Label>
                 <Input
                   type="number"
                   value={agentTimeoutS}
                   onChange={(e) => setAgentTimeoutS(Number(e.target.value || 15))}
+                  placeholder="15"
                   className="border-slate-200"
                 />
               </div>
@@ -384,14 +419,14 @@ export const Settings = () => {
 
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <Label>API Key</Label>
+                <Label>{tt("API Key（可选）", "API Key (Optional)")}</Label>
                 {agentApiKeySet && <span className="text-xs font-medium text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">{tt("密钥已保存", "Key Saved")}</span>}
               </div>
               <Input
                 type="password"
                 value={agentApiKeyInput}
                 onChange={(e) => setAgentApiKeyInput(e.target.value)}
-                placeholder={tt("sk-...（出于安全考虑不会自动回填）", "sk-... (won't be auto-filled for security)")}
+                placeholder="sk-..."
               />
             </div>
 
@@ -504,40 +539,99 @@ export const Settings = () => {
               </h4>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label>{tt("模型名称", "Model Name")}</Label>
-                  <Input 
-                    placeholder={tt("例如：Qwen2.5-7B-Instruct", "e.g. Qwen2.5-7B-Instruct")} 
+                  <Label>{tt("模型名称（必填）", "Model Name (Required)")}</Label>
+                  <Input
+                    placeholder={tt("例如：Qwen2.5-7B-Instruct", "e.g. Qwen2.5-7B-Instruct")}
                     value={newModel.name}
                     onChange={e => setNewModel({...newModel, name: e.target.value})}
                     className="bg-white"
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>{tt("模型路径 / HuggingFace ID", "Model Path / HuggingFace ID")}</Label>
-                  <Input 
-                    placeholder="/mnt/models/..." 
+                  <Label>{tt("模型类型", "Model Type")}</Label>
+                  <select
+                    value={newModel.is_api ? "api" : "local"}
+                    onChange={e => setNewModel({...newModel, is_api: e.target.value === "api"})}
+                    className="w-full h-10 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
+                  >
+                    <option value="local">{tt("本地模型 / HuggingFace", "Local / HuggingFace")}</option>
+                    <option value="api">{tt("API 服务", "API Service")}</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* 本地模型配置 */}
+              {!newModel.is_api && (
+                <div className="space-y-2">
+                  <Label>{tt("模型路径（必填）", "Model Path (Required)")}</Label>
+                  <Input
+                    placeholder="/mnt/models/... 或 Qwen/Qwen2.5-7B-Instruct"
                     value={newModel.path}
                     onChange={e => setNewModel({...newModel, path: e.target.value})}
                     className="bg-white"
                   />
                 </div>
-              </div>
+              )}
+
+              {/* API 模型配置 */}
+              {newModel.is_api && (
+                <div className="space-y-4 p-4 border border-violet-200 rounded-lg bg-violet-50/50">
+                  <div className="space-y-2">
+                    <Label>{tt("API 地址（必填）", "API URL (Required)")}</Label>
+                    <Input
+                      placeholder="http://your-server:8080/v1"
+                      value={newModel.api_url || ""}
+                      onChange={e => setNewModel({...newModel, api_url: e.target.value})}
+                      className="bg-white"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{tt("模型标识（必填）", "Model Identifier (Required)")}</Label>
+                    <Input
+                      placeholder="gpt-4o / deepseek-v3 / ..."
+                      value={newModel.path}
+                      onChange={e => setNewModel({...newModel, path: e.target.value})}
+                      className="bg-white"
+                    />
+                    <p className="text-xs text-slate-500">{tt("API 服务中该模型的名称标识", "The model identifier in your API service")}</p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{tt("API Key（可选）", "API Key (Optional)")}</Label>
+                    <Input
+                      type="password"
+                      placeholder="sk-..."
+                      value={newModel.api_key || ""}
+                      onChange={e => setNewModel({...newModel, api_key: e.target.value})}
+                      className="bg-white"
+                    />
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-3">
                 <Button
                   variant="outline"
-                  onClick={() => handleTestModelLoad(newModel.path)}
-                  disabled={!newModel.path.trim() || !!testingModelPath}
+                  onClick={() => handleTestModel(newModel)}
+                  disabled={!canTestModel(newModel) || !!testingModelPath}
                   className="w-full"
                 >
-                  {testingModelPath === newModel.path.trim() ? tt("测试中...", "Testing...") : tt("测试加载模型", "Test Model Load")}
+                  {testingModelPath === getModelTestKey(newModel) ? tt("测试中...", "Testing...") : tt("测试连接", "Test Connection")}
                 </Button>
-                <Button onClick={handleSaveModel} disabled={loading} className="w-full text-white bg-slate-900 hover:bg-slate-800">
+                <Button onClick={handleSaveModel} disabled={loading || !canSaveModel(newModel)} className="w-full text-white bg-slate-900 hover:bg-slate-800">
                   {loading ? tt("保存中...", "Saving...") : <><Save className="w-4 h-4 mr-2"/> {tt("加入注册表", "Add to Registry")}</>}
                 </Button>
               </div>
-              {newModel.path.trim() && modelTestMsg[newModel.path.trim()] && (
-                <div className={`text-xs px-3 py-2 rounded border ${modelTestMsg[newModel.path.trim()].includes(tt("加载成功", "Load passed")) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-red-50 text-red-700 border-red-200"}`}>
-                  {modelTestMsg[newModel.path.trim()]}
+              {!canSaveModel(newModel) && (
+                <div className="text-xs text-amber-600 bg-amber-50 px-3 py-2 rounded border border-amber-200">
+                  {tt(
+                    `请填写：${!newModel.name ? "模型名称" : ""}${newModel.is_api ? (!newModel.api_url ? "、API 地址" : "") + (!newModel.path ? "、模型标识" : "") : (!newModel.path ? "、模型路径" : "")}`,
+                    `Please fill: ${!newModel.name ? "Model Name" : ""}${newModel.is_api ? (!newModel.api_url ? ", API URL" : "") + (!newModel.path ? ", Model ID" : "") : (!newModel.path ? ", Model Path" : "")}`
+                  )}
+                </div>
+              )}
+              {getModelTestKey(newModel) && modelTestMsg[getModelTestKey(newModel)] && (
+                <div className={`text-xs px-3 py-2 rounded border ${modelTestMsg[getModelTestKey(newModel)].includes(tt("成功", "OK")) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-red-50 text-red-700 border-red-200"}`}>
+                  {modelTestMsg[getModelTestKey(newModel)]}
                 </div>
               )}
             </div>
@@ -555,23 +649,36 @@ export const Settings = () => {
                   <div key={i}>
                     <div className="flex items-center justify-between p-4 rounded-xl border border-slate-100 bg-white hover:border-slate-200 hover:shadow-sm transition-all">
                       <div className="flex-1 min-w-0 mr-4">
-                        <div className="font-semibold text-slate-900">{m.name}</div>
-                        <div className="text-xs text-slate-500 truncate font-mono mt-1" title={m.path}>{m.path}</div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-slate-900">{m.name}</span>
+                          {m.is_api && <span className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700">API</span>}
+                        </div>
+                        <div className="text-xs text-slate-500 truncate font-mono mt-1" title={m.is_api ? m.api_url : m.path}>
+                          {m.is_api ? `${m.api_url} → ${m.path}` : m.path}
+                        </div>
                       </div>
                       <div className="flex items-center gap-2">
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => handleTestModelLoad(m.path)}
-                          disabled={testingModelPath === m.path}
+                          onClick={() => handleTestModel(m)}
+                          disabled={testingModelPath === getModelTestKey(m)}
                         >
-                          {testingModelPath === m.path ? tt("测试中...", "Testing...") : tt("测试加载", "Test Load")}
+                          {testingModelPath === getModelTestKey(m) ? tt("测试中...", "Testing...") : tt("测试连接", "Test")}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-500 hover:text-red-600 hover:bg-red-50"
+                          onClick={() => handleDeleteModel(i)}
+                        >
+                          <Trash2 className="w-4 h-4" />
                         </Button>
                       </div>
                     </div>
-                    {modelTestMsg[m.path] && (
-                      <div className={`-mt-2 mb-1 text-xs px-3 py-2 rounded border ${modelTestMsg[m.path].includes(tt("加载成功", "Load passed")) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-red-50 text-red-700 border-red-200"}`}>
-                        {modelTestMsg[m.path]}
+                    {modelTestMsg[getModelTestKey(m)] && (
+                      <div className={`-mt-2 mb-1 text-xs px-3 py-2 rounded border ${modelTestMsg[getModelTestKey(m)].includes(tt("成功", "OK")) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-red-50 text-red-700 border-red-200"}`}>
+                        {modelTestMsg[getModelTestKey(m)]}
                       </div>
                     )}
                   </div>

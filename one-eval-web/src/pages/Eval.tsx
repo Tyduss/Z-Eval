@@ -375,11 +375,18 @@ export const Eval = () => {
       // Fetch default model
       let targetModelName = "Qwen2.5-7B";
       let targetModelPath = "/mnt/DataFlow/models/Qwen2.5-7B-Instruct";
+      let isApi = false;
+      let apiUrl: string | undefined;
+      let apiKey: string | undefined;
       try {
         const modelsRes = await axios.get(`${apiBaseUrl}/api/models`);
         if (modelsRes.data && modelsRes.data.length > 0) {
-            targetModelName = modelsRes.data[0].name;
-            targetModelPath = modelsRes.data[0].path;
+            const firstModel = modelsRes.data[0];
+            targetModelName = firstModel.name;
+            targetModelPath = firstModel.path;
+            isApi = firstModel.is_api || false;
+            apiUrl = firstModel.api_url;
+            apiKey = firstModel.api_key;
         }
       } catch (e) {}
 
@@ -390,11 +397,14 @@ export const Eval = () => {
         use_rag: useRAG,
         local_count: localCount,
         hf_count: hfCount,
-        language: lang
+        language: lang,
+        is_api: isApi,
+        api_url: apiUrl,
+        api_key: apiKey,
       });
       setThreadId(res.data.thread_id);
       setStatus("running");
-      
+
       setMessages(prev => [...prev, { id: Date.now().toString(), role: "ai", content: t({ zh: "我已启动评测流程，先为你解析需求。", en: "I've started the evaluation workflow. I'll analyze your query first." }), timestamp: Date.now() }]);
 
     } catch (e) {
