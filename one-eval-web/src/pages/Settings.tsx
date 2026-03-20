@@ -4,9 +4,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { 
-  Plus, Save, Database, Cloud, KeyRound, Trash2, PlugZap, 
-  ChevronDown, CheckCircle2
+import {
+  Plus, Save, Database, Cloud, KeyRound, Trash2, PlugZap,
+  ChevronDown, CheckCircle2, Pencil, X
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useLang } from "@/lib/i18n";
@@ -85,6 +85,8 @@ export const Settings = () => {
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [selectedModelIdxs, setSelectedModelIdxs] = useState<Set<number>>(new Set());
   const [newModel, setNewModel] = useState<ModelConfig>({ name: "", path: "", is_api: false, api_url: "", api_key: "" });
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editModel, setEditModel] = useState<ModelConfig>({ name: "", path: "", is_api: false, api_url: "", api_key: "" });
   const [loading, setLoading] = useState(false);
   const [apiBaseUrl] = useState(() => localStorage.getItem("oneEval.apiBaseUrl") || "http://localhost:8000");
   const [hfEndpoint, setHfEndpoint] = useState("https://hf-mirror.com");
@@ -347,6 +349,22 @@ export const Settings = () => {
     try {
       await axios.delete(`${apiBaseUrl}/api/models/${index}`);
       setModels(models.filter((_, i) => i !== index));
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleUpdateModel = async (index: number) => {
+    if (!editModel.name || !editModel.path) return;
+    try {
+      // 更新后端
+      await axios.put(`${apiBaseUrl}/api/models/${index}`, editModel);
+      // 更新本地状态
+      const newModels = [...models];
+      newModels[index] = editModel;
+      setModels(newModels);
+      setEditingIndex(null);
+      setEditModel({ name: "", path: "", is_api: false, api_url: "", api_key: "" });
     } catch (e) {
       console.error(e);
     }
@@ -664,54 +682,147 @@ export const Settings = () => {
               <div className="grid grid-cols-1 gap-3">
                 {models.map((m, i) => (
                   <div key={i}>
-                    <div className={`flex items-center justify-between p-4 rounded-xl border transition-all ${selectedModelIdxs.has(i) ? "border-emerald-300 bg-emerald-50/30" : "border-slate-100 bg-white hover:border-slate-200"}`}>
-                      <div className="flex items-center gap-3 flex-1 min-w-0 mr-4">
-                        <input
-                          type="checkbox"
-                          title={tt("选择参与评测", "Select for evaluation")}
-                          checked={selectedModelIdxs.has(i)}
-                          onChange={(e) => {
-                            const newSet = new Set(selectedModelIdxs);
-                            if (e.target.checked) {
-                              newSet.add(i);
-                            } else {
-                              newSet.delete(i);
-                            }
-                            setSelectedModelIdxs(newSet);
-                            // 保存到 localStorage
-                            localStorage.setItem("oneEval.selectedModels", JSON.stringify([...newSet]));
-                          }}
-                          className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="font-semibold text-slate-900">{m.name}</span>
-                            {m.is_api && <span className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700">API</span>}
+                    {editingIndex === i ? (
+                      /* 编辑模式 */
+                      <div className="p-4 rounded-xl border border-blue-200 bg-blue-50/30 space-y-4">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <Label>{tt("模型名称（必填）", "Model Name (Required)")}</Label>
+                            <Input
+                              value={editModel.name}
+                              onChange={e => setEditModel({...editModel, name: e.target.value})}
+                              className="bg-white"
+                            />
                           </div>
-                          <div className="text-xs text-slate-500 truncate font-mono mt-1" title={m.is_api ? m.api_url : m.path}>
-                            {m.is_api ? `${m.api_url} → ${m.path}` : m.path}
+                          <div className="space-y-2">
+                            <Label>{tt("模型类型", "Model Type")}</Label>
+                            <select
+                              title={tt("选择模型类型", "Select model type")}
+                              value={editModel.is_api ? "api" : "local"}
+                              onChange={e => setEditModel({...editModel, is_api: e.target.value === "api"})}
+                              className="w-full h-10 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900"
+                            >
+                              <option value="local">{tt("本地模型 / HuggingFace", "Local / HuggingFace")}</option>
+                              <option value="api">{tt("API 服务", "API Service")}</option>
+                            </select>
                           </div>
                         </div>
+                        {!editModel.is_api ? (
+                          <div className="space-y-2">
+                            <Label>{tt("模型路径（必填）", "Model Path (Required)")}</Label>
+                            <Input
+                              value={editModel.path}
+                              onChange={e => setEditModel({...editModel, path: e.target.value})}
+                              className="bg-white"
+                            />
+                          </div>
+                        ) : (
+                          <div className="space-y-4 p-4 border border-violet-200 rounded-lg bg-violet-50/50">
+                            <div className="space-y-2">
+                              <Label>{tt("API 地址（必填）", "API URL (Required)")}</Label>
+                              <Input
+                                value={editModel.api_url || ""}
+                                onChange={e => setEditModel({...editModel, api_url: e.target.value})}
+                                className="bg-white"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label>{tt("模型标识（必填）", "Model Identifier (Required)")}</Label>
+                              <Input
+                                value={editModel.path}
+                                onChange={e => setEditModel({...editModel, path: e.target.value})}
+                                className="bg-white"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label>{tt("API Key（可选）", "API Key (Optional)")}</Label>
+                              <Input
+                                type="password"
+                                value={editModel.api_key || ""}
+                                onChange={e => setEditModel({...editModel, api_key: e.target.value})}
+                                className="bg-white"
+                              />
+                            </div>
+                          </div>
+                        )}
+                        <div className="flex gap-2">
+                          <Button
+                            onClick={() => handleUpdateModel(i)}
+                            disabled={!editModel.name || !editModel.path}
+                            className="flex-1 bg-blue-600 hover:bg-blue-700 text-white"
+                          >
+                            <Save className="w-4 h-4 mr-2" /> {tt("保存修改", "Save Changes")}
+                          </Button>
+                          <Button
+                            variant="outline"
+                            onClick={() => { setEditingIndex(null); setEditModel({ name: "", path: "", is_api: false, api_url: "", api_key: "" }); }}
+                            className="flex-1"
+                          >
+                            <X className="w-4 h-4 mr-2" /> {tt("取消", "Cancel")}
+                          </Button>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleTestModel(m)}
-                          disabled={testingModelPath === getModelTestKey(m)}
-                        >
-                          {testingModelPath === getModelTestKey(m) ? tt("测试中...", "Testing...") : tt("测试", "Test")}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-red-500 hover:text-red-600 hover:bg-red-50"
-                          onClick={() => handleDeleteModel(i)}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
+                    ) : (
+                      /* 查看模式 */
+                      <div className={`flex items-center justify-between p-4 rounded-xl border transition-all ${selectedModelIdxs.has(i) ? "border-emerald-300 bg-emerald-50/30" : "border-slate-100 bg-white hover:border-slate-200"}`}>
+                        <div className="flex items-center gap-3 flex-1 min-w-0 mr-4">
+                          <input
+                            type="checkbox"
+                            title={tt("选择参与评测", "Select for evaluation")}
+                            checked={selectedModelIdxs.has(i)}
+                            onChange={(e) => {
+                              const newSet = new Set(selectedModelIdxs);
+                              if (e.target.checked) {
+                                newSet.add(i);
+                              } else {
+                                newSet.delete(i);
+                              }
+                              setSelectedModelIdxs(newSet);
+                              localStorage.setItem("oneEval.selectedModels", JSON.stringify([...newSet]));
+                            }}
+                            className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-slate-900">{m.name}</span>
+                              {m.is_api && <span className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700">API</span>}
+                            </div>
+                            <div className="text-xs text-slate-500 truncate font-mono mt-1" title={m.is_api ? m.api_url : m.path}>
+                              {m.is_api ? `${m.api_url} → ${m.path}` : m.path}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-slate-500 hover:text-slate-700 hover:bg-slate-100"
+                            onClick={() => {
+                              setEditingIndex(i);
+                              setEditModel({ ...m });
+                            }}
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleTestModel(m)}
+                            disabled={testingModelPath === getModelTestKey(m)}
+                          >
+                            {testingModelPath === getModelTestKey(m) ? tt("测试中...", "Testing...") : tt("测试", "Test")}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-red-500 hover:text-red-600 hover:bg-red-50"
+                            onClick={() => handleDeleteModel(i)}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
                       </div>
-                    </div>
+                    )}
                     {modelTestMsg[getModelTestKey(m)] && (
                       <div className={`-mt-2 mb-1 text-xs px-3 py-2 rounded border ${modelTestMsg[getModelTestKey(m)].includes(tt("成功", "OK")) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-red-50 text-red-700 border-red-200"}`}>
                         {modelTestMsg[getModelTestKey(m)]}

@@ -1399,6 +1399,17 @@ def delete_model(index: int):
         return {"status": "success"}
     raise HTTPException(status_code=404, detail="Model not found")
 
+@app.put("/api/models/{index}")
+def update_model(index: int, model: Dict[str, Any]):
+    models = _load_json_file(MODELS_FILE, default=[])
+    if not isinstance(models, list):
+        models = []
+    if 0 <= index < len(models):
+        models[index] = model
+        _write_json_file(MODELS_FILE, models)
+        return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Model not found")
+
 class ModelTestRequest(BaseModel):
     is_api: bool = False
     path: Optional[str] = None
