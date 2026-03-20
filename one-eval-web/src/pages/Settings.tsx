@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import {
   Plus, Save, Database, Cloud, KeyRound, Trash2, PlugZap,
-  ChevronDown, CheckCircle2, Pencil, X
+  ChevronDown, CheckCircle2, Pencil, X, Wifi, CheckCircle, AlertCircle
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useLang } from "@/lib/i18n";
@@ -93,6 +93,8 @@ export const Settings = () => {
   const [hfToken, setHfToken] = useState("");
   const [hfTokenSet, setHfTokenSet] = useState(false);
   const [savingHf, setSavingHf] = useState(false);
+  const [testingHf, setTestingHf] = useState(false);
+  const [hfTestResult, setHfTestResult] = useState<string | null>(null);
   const [agentBaseUrl, setAgentBaseUrl] = useState("http://123.129.219.111:3000/v1");
   const [agentModel, setAgentModel] = useState("gpt-4o");
   const [agentApiKeyInput, setAgentApiKeyInput] = useState("");
@@ -190,6 +192,25 @@ export const Settings = () => {
       console.error(e);
     }
     setSavingHf(false);
+  };
+
+  const handleTestHfConfig = async () => {
+    setTestingHf(true);
+    setHfTestResult(null);
+    try {
+      const payload: any = { endpoint: hfEndpoint };
+      if (hfToken.trim()) payload.token = hfToken;
+      const res = await axios.post(`${apiBaseUrl}/api/config/hf/test`, payload);
+      if (res.data.ok) {
+        setHfTestResult("success");
+      } else {
+        setHfTestResult(`fail:${res.data.detail || "Unknown error"}`);
+      }
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail || e?.message || "Unknown error";
+      setHfTestResult(`fail:${detail}`);
+    }
+    setTestingHf(false);
   };
 
   const handleClearHfToken = async () => {
@@ -538,20 +559,49 @@ export const Settings = () => {
               <Button
                 className="flex-1 text-white bg-slate-900 hover:bg-slate-800"
                 onClick={handleSaveHfConfig}
-                disabled={savingHf}
+                disabled={savingHf || testingHf}
               >
                 {savingHf ? tt("保存中...", "Saving...") : <><KeyRound className="w-4 h-4 mr-2" /> {tt("保存 HF 配置", "Save HF Config")}</>}
               </Button>
               <Button
                 variant="outline"
+                className="flex-1"
+                onClick={handleTestHfConfig}
+                disabled={savingHf || testingHf}
+              >
+                {testingHf ? tt("测试中...", "Testing...") : <><Wifi className="w-4 h-4 mr-2" /> {tt("测试连接", "Test Connection")}</>}
+              </Button>
+              <Button
+                variant="outline"
                 className="flex-1 text-red-500 hover:text-red-600 hover:bg-red-50"
                 onClick={handleClearHfToken}
-                disabled={savingHf}
+                disabled={savingHf || testingHf}
               >
                 <Trash2 className="w-4 h-4 mr-2" />
                 {tt("清除令牌", "Clear Token")}
               </Button>
             </div>
+
+            {/* Test Result */}
+            {hfTestResult && (
+              <div className={`p-3 rounded-lg flex items-center gap-2 text-sm ${
+                hfTestResult === "success"
+                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                  : "bg-red-50 text-red-700 border border-red-200"
+              }`}>
+                {hfTestResult === "success" ? (
+                  <>
+                    <CheckCircle className="w-4 h-4" />
+                    <span>{tt("连接成功！", "Connection successful!")}</span>
+                  </>
+                ) : (
+                  <>
+                    <AlertCircle className="w-4 h-4" />
+                    <span>{tt("连接失败: ", "Connection failed: ")}{hfTestResult.replace("fail:", "")}</span>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </SettingsCard>
 

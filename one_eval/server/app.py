@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 
 import requests
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from one_eval.logger import get_logger
@@ -262,6 +262,16 @@ class HFConfigUpdateRequest(BaseModel):
     token: Optional[str] = None
     clear_token: bool = False
 
+class HFTestRequest(BaseModel):
+    endpoint: Optional[str] = None
+    token: Optional[str] = None
+
+class HFTestResponse(BaseModel):
+    ok: bool
+    status_code: Optional[int] = None
+    detail: str
+    endpoint: str
+
 class AgentConfigResponse(BaseModel):
     provider: str
     base_url: str
@@ -328,6 +338,71 @@ def update_hf_config(req: HFConfigUpdateRequest):
     save_server_config(cfg)
     apply_hf_env_from_config(cfg)
     return {"endpoint": endpoint, "token_set": isinstance(token, str) and bool(token.strip())}
+
+@app.post("/api/config/hf/test", response_model=HFTestResponse)
+async def test_hf_config(req: Optional[HFTestRequest] = None):
+    """Test HuggingFace endpoint connectivity"""
+    cfg = load_server_config()
+    hf = cfg.get("hf") or {}
+
+    # Get endpoint to test
+    endpoint = hf.get("endpoint") or "https://hf-mirror.com"
+    if req and req.endpoint and req.endpoint.strip():
+        endpoint = req.endpoint.strip()
+
+    # Get token (optional)
+    token = hf.get("token")
+    if req and req.token is not None:
+        token = req.token.strip() if req.token.strip() else None
+
+    # Normalize endpoint URL
+    endpoint = endpoint.rstrip("/")
+    if not endpoint.startswith("http"):
+        endpoint = f"https://{endpoint}"
+
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            # Test by fetching the /models endpoint (public API)
+            r = await client.get(f"{endpoint}/models", headers=headers)
+            if r.status_code == 200:
+                return {
+                    "ok": True,
+                    "status_code": r.status_code,
+                    "detail": f"连接成功: {endpoint}",
+                    "endpoint": endpoint
+                }
+            else:
+                return {
+                    "ok": False,
+                    "status_code": r.status_code,
+                    "detail": f"HTTP {r.status_code}: {r.text[:200]}",
+                    "endpoint": endpoint
+                }
+        except httpx.TimeoutStatus:
+            return {
+                "ok": False,
+                "status_code": None,
+                "detail": f"连接超时: {endpoint}",
+                "endpoint": endpoint
+            }
+        except httpx.ConnectError as e:
+            return {
+                "ok": False,
+                "status_code": None,
+                "detail": f"无法连接: {str(e)}",
+                "endpoint": endpoint
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "status_code": None,
+                "detail": f"测试失败: {str(e)}",
+                "endpoint": endpoint
+            }
 
 @app.get("/api/config/agent", response_model=AgentConfigResponse)
 def get_agent_config():
@@ -519,7 +594,8 @@ class ManualStartRequest(BaseModel):
     user_query: str = "manual eval"
     target_model_name: Optional[str] = None
     language: str = "zh"
-    target_model: Dict[str, Any]
+    target_model: Optional[Dict[str, Any]] = None  # Single model (backward compatible)
+    target_models: Optional[List[Dict[str, Any]]] = None  # Multi-model support
     benches: List[ManualBenchRequest]
 
 class WorkflowStatusResponse(BaseModel):
@@ -945,31 +1021,66 @@ async def manual_start(req: ManualStartRequest):
     thread_id = str(uuid.uuid4())
     _set_thread_created_at(thread_id)
 
-    tm = req.target_model or {}
-    model_name_or_path = (
-        tm.get("model_name_or_path")
-        or tm.get("path")
-        or tm.get("model_path")
-        or tm.get("hf_model_name_or_path")
-    )
-    if not model_name_or_path:
-        raise HTTPException(status_code=400, detail="target_model missing model_name_or_path/path")
+    # Build target_models list (multi-model support)
+    target_models_list: List[ModelConfig] = []
 
-    model_cfg = ModelConfig(
-        model_name_or_path=str(model_name_or_path),
-        is_api=bool(tm.get("is_api", False)),
-        api_url=tm.get("api_url"),
-        api_key=tm.get("api_key"),
-        temperature=float(tm.get("temperature", 0.0) or 0.0),
-        top_p=float(tm.get("top_p", 1.0) or 1.0),
-        top_k=int(tm.get("top_k", -1) if tm.get("top_k", -1) is not None else -1),
-        repetition_penalty=float(tm.get("repetition_penalty", 1.0) or 1.0),
-        max_tokens=int(tm.get("max_tokens", 2048) or 2048),
-        seed=(int(tm["seed"]) if tm.get("seed") is not None else None),
-        tensor_parallel_size=int(tm.get("tensor_parallel_size", 1) or 1),
-        max_model_len=tm.get("max_model_len"),
-        gpu_memory_utilization=float(tm.get("gpu_memory_utilization", 0.9) or 0.9),
-    )
+    # Priority: target_models array > single target_model
+    if req.target_models:
+        for tm in req.target_models:
+            model_name_or_path = (
+                tm.get("model_name_or_path")
+                or tm.get("path")
+                or tm.get("model_path")
+                or tm.get("hf_model_name_or_path")
+            )
+            if not model_name_or_path:
+                continue
+            cfg = ModelConfig(
+                model_name_or_path=str(model_name_or_path),
+                is_api=bool(tm.get("is_api", False)),
+                api_url=tm.get("api_url"),
+                api_key=tm.get("api_key"),
+                temperature=float(tm.get("temperature", 0.0) or 0.0),
+                top_p=float(tm.get("top_p", 1.0) or 1.0),
+                top_k=int(tm.get("top_k", -1) if tm.get("top_k", -1) is not None else -1),
+                repetition_penalty=float(tm.get("repetition_penalty", 1.0) or 1.0),
+                max_tokens=int(tm.get("max_tokens", 2048) or 2048),
+                seed=(int(tm["seed"]) if tm.get("seed") is not None else None),
+                tensor_parallel_size=int(tm.get("tensor_parallel_size", 1) or 1),
+                max_model_len=tm.get("max_model_len"),
+                gpu_memory_utilization=float(tm.get("gpu_memory_utilization", 0.9) or 0.9),
+            )
+            target_models_list.append(cfg)
+
+    # Fallback to single target_model for backward compatibility
+    if not target_models_list and req.target_model:
+        tm = req.target_model
+        model_name_or_path = (
+            tm.get("model_name_or_path")
+            or tm.get("path")
+            or tm.get("model_path")
+            or tm.get("hf_model_name_or_path")
+        )
+        if model_name_or_path:
+            single_model = ModelConfig(
+                model_name_or_path=str(model_name_or_path),
+                is_api=bool(tm.get("is_api", False)),
+                api_url=tm.get("api_url"),
+                api_key=tm.get("api_key"),
+                temperature=float(tm.get("temperature", 0.0) or 0.0),
+                top_p=float(tm.get("top_p", 1.0) or 1.0),
+                top_k=int(tm.get("top_k", -1) if tm.get("top_k", -1) is not None else -1),
+                repetition_penalty=float(tm.get("repetition_penalty", 1.0) or 1.0),
+                max_tokens=int(tm.get("max_tokens", 2048) or 2048),
+                seed=(int(tm["seed"]) if tm.get("seed") is not None else None),
+                tensor_parallel_size=int(tm.get("tensor_parallel_size", 1) or 1),
+                max_model_len=tm.get("max_model_len"),
+                gpu_memory_utilization=float(tm.get("gpu_memory_utilization", 0.9) or 0.9),
+            )
+            target_models_list.append(single_model)
+
+    if not target_models_list:
+        raise HTTPException(status_code=400, detail="No valid model configuration provided")
 
     benches: List[BenchInfo] = []
     for b in req.benches:
@@ -985,14 +1096,7 @@ async def manual_start(req: ManualStartRequest):
             )
         )
 
-    initial_state = NodeState(
-        user_query=req.user_query,
-        request=MainRequest(language=req.language),
-        target_model_name=req.target_model_name or str(model_name_or_path),
-        target_model=model_cfg,
-        benches=benches,
-        eval_cursor=0,
-    )
+    first_model_name = target_models_list[0].model_name_or_path
 
     async with get_checkpointer(DB_PATH, mode="run") as checkpointer:
         graph = build_complete_workflow(checkpointer=checkpointer)
@@ -1000,16 +1104,17 @@ async def manual_start(req: ManualStartRequest):
         await graph.aupdate_state(
             config,
             {
-                "user_query": initial_state.user_query,
-                "target_model_name": initial_state.target_model_name,
-                "target_model": initial_state.target_model,
-                "benches": initial_state.benches,
+                "user_query": req.user_query,
+                "target_model_name": req.target_model_name or first_model_name,
+                "target_model": target_models_list[0],
+                "target_models": target_models_list,
+                "benches": benches,
                 "eval_cursor": 0,
             },
         )
 
     _launch_graph_task(thread_id, None, resume_command=Command(goto="DataFlowEvalNode"))
-    return {"thread_id": thread_id, "status": "started"}
+    return {"thread_id": thread_id, "status": "started", "model_count": len(target_models_list)}
 
 def _bench_download_sync(bench: Dict[str, Any], *, repo_root: Path, overrides: Dict[str, Any], max_retries: int = 3) -> Dict[str, Any]:
     def _pick_best_split(splits: List[str], preferred: str) -> str:
@@ -1374,6 +1479,51 @@ async def get_history():
     return items
 
 
+@app.delete("/api/workflow/history/{thread_id}")
+async def delete_history(thread_id: str):
+    """Delete a workflow history item by thread_id."""
+    if not DB_PATH.exists():
+        raise HTTPException(status_code=404, detail="History not found")
+
+    try:
+        # Delete checkpoints for this thread_id
+        async with get_checkpointer(DB_PATH, mode="run") as cp:
+            # Check if thread exists first
+            async with cp.conn.execute("SELECT 1 FROM checkpoints WHERE thread_id = ? LIMIT 1", (thread_id,)) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="History not found")
+
+            # Delete from checkpoints table (the main table used by langgraph)
+            await cp.conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
+
+            # Try to delete from other tables if they exist (langgraph may use different schemas)
+            for table in ["checkpoint_blobs", "checkpoint_writes", "checkpoints_writes"]:
+                try:
+                    await cp.conn.execute(f"DELETE FROM {table} WHERE thread_id = ?", (thread_id,))
+                except Exception:
+                    pass  # Table doesn't exist, ignore
+
+            await cp.conn.commit()
+
+        # Also remove from thread meta
+        thread_meta = _load_thread_meta()
+        if thread_id in thread_meta:
+            del thread_meta[thread_id]
+            _write_json_file(THREAD_META_FILE, thread_meta)
+
+        # Remove from running tasks if present
+        if thread_id in RUNNING_WORKFLOW_TASKS:
+            del RUNNING_WORKFLOW_TASKS[thread_id]
+
+        return {"status": "deleted", "thread_id": thread_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Error deleting history {thread_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/models")
 def get_models():
     models = _load_json_file(MODELS_FILE, default=[])
@@ -1502,6 +1652,298 @@ def get_bench_gallery():
     return bench_registry.get_all_benches()
 
 
+@app.delete("/api/benches/gallery/{bench_name}")
+def delete_bench_from_gallery(bench_name: str):
+    """从 gallery 中删除 benchmark"""
+    success = bench_registry.delete_bench(bench_name, str(BENCH_GALLERY_PATH))
+    if success:
+        return {"status": "success", "message": f"Bench '{bench_name}' deleted"}
+    else:
+        raise HTTPException(status_code=404, detail=f"Bench '{bench_name}' not found or cannot be deleted")
+
+
+class AppendAttachmentRequest(BaseModel):
+    bench_name: str
+
+
+@app.post("/api/benches/append_attachment")
+async def append_attachment_to_bench(
+    file: UploadFile = File(...),
+    bench_name: str = Form(...),
+):
+    """追加附件到已有的 benchmark"""
+    import aiofiles
+
+    # 查找 bench
+    bench = bench_registry.get_bench_by_name(bench_name)
+    if not bench:
+        raise HTTPException(status_code=404, detail=f"Bench '{bench_name}' not found")
+
+    # 验证文件类型
+    allowed_extensions = {".csv", ".jsonl", ".json", ".xlsx", ".xls", ".txt"}
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {file_ext}. Allowed: {allowed_extensions}"
+        )
+
+    # 安全化文件名
+    safe_bench_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in bench_name)
+    timestamp = int(datetime.now().timestamp())
+    saved_filename = f"{safe_bench_name}_attachment_{timestamp}{file_ext}"
+    saved_path = UPLOAD_DIR / saved_filename
+
+    # 保存文件
+    async with aiofiles.open(saved_path, "wb") as out_file:
+        content = await file.read()
+        await out_file.write(content)
+
+    # 更新 bench 的 artifact_paths
+    meta = bench.get("meta", {})
+    if not isinstance(meta, dict):
+        meta = {}
+    artifact_paths = meta.get("artifact_paths", [])
+    if not isinstance(artifact_paths, list):
+        artifact_paths = []
+    artifact_paths.append(str(saved_path))
+    meta["artifact_paths"] = artifact_paths
+    bench["meta"] = meta
+
+    # 更新 bench_gallery.json
+    try:
+        with open(BENCH_GALLERY_PATH, "r", encoding="utf-8") as f:
+            file_data = json.load(f)
+
+        if isinstance(file_data, dict) and "benches" in file_data:
+            for i, b in enumerate(file_data["benches"]):
+                if b.get("bench_name") == bench.get("bench_name"):
+                    file_data["benches"][i] = bench
+                    break
+
+            with open(BENCH_GALLERY_PATH, "w", encoding="utf-8") as f:
+                json.dump(file_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.error(f"Failed to update bench_gallery.json: {e}")
+
+    return {
+        "status": "success",
+        "file_path": str(saved_path),
+        "artifact_paths": artifact_paths
+    }
+
+
+@app.get("/api/benches/preview/{bench_name}")
+async def preview_bench_file(bench_name: str, limit: int = 10):
+    """预览 benchmark 的数据文件内容"""
+    bench = bench_registry.get_bench_by_name(bench_name)
+    if not bench:
+        raise HTTPException(status_code=404, detail=f"Bench '{bench_name}' not found")
+
+    # 获取数据集路径
+    dataset_cache = bench.get("dataset_cache")
+    if not dataset_cache or not Path(dataset_cache).exists():
+        raise HTTPException(status_code=404, detail="Dataset file not found")
+
+    file_path = Path(dataset_cache)
+    file_ext = file_path.suffix.lower()
+
+    try:
+        if file_ext == ".jsonl":
+            # 读取 JSONL 文件
+            rows = []
+            with open(file_path, "r", encoding="utf-8") as f:
+                for i, line in enumerate(f):
+                    if i >= limit:
+                        break
+                    line = line.strip()
+                    if line:
+                        row = json.loads(line)
+                        rows.append(row)
+            # 获取所有字段名
+            all_keys = set()
+            for row in rows:
+                all_keys.update(row.keys())
+            return {
+                "format": "jsonl",
+                "columns": sorted(list(all_keys)),
+                "rows": rows,
+                "total_shown": len(rows),
+            }
+        elif file_ext == ".json":
+            # 读取 JSON 文件
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                rows = data[:limit]
+                all_keys = set()
+                for row in rows:
+                    if isinstance(row, dict):
+                        all_keys.update(row.keys())
+                return {
+                    "format": "json",
+                    "columns": sorted(list(all_keys)),
+                    "rows": rows,
+                    "total_shown": len(rows),
+                }
+            else:
+                return {"format": "json", "columns": list(data.keys()) if isinstance(data, dict) else [], "rows": [data], "total_shown": 1}
+        elif file_ext == ".csv":
+            # 读取 CSV 文件
+            import pandas as pd
+            df = pd.read_csv(file_path, nrows=limit)
+            return {
+                "format": "csv",
+                "columns": list(df.columns),
+                "rows": df.to_dict(orient="records"),
+                "total_shown": len(df),
+            }
+        elif file_ext in {".xlsx", ".xls"}:
+            # 读取 Excel 文件
+            import pandas as pd
+            df = pd.read_excel(file_path, nrows=limit)
+            return {
+                "format": "excel",
+                "columns": list(df.columns),
+                "rows": df.to_dict(orient="records"),
+                "total_shown": len(df),
+            }
+        else:
+            # 读取文本文件
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = [line.rstrip("\n") for line in list(f)[:limit]]
+            return {
+                "format": "text",
+                "columns": ["content"],
+                "rows": [{"content": line} for line in lines],
+                "total_shown": len(lines),
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+
+
+@app.get("/api/benches/analyze_fields/{bench_name}")
+async def analyze_bench_fields(bench_name: str):
+    """分析 benchmark 数据文件的字段，识别 prompt/target 等关键字段"""
+    bench = bench_registry.get_bench_by_name(bench_name)
+    if not bench:
+        raise HTTPException(status_code=404, detail=f"Bench '{bench_name}' not found")
+
+    dataset_cache = bench.get("dataset_cache")
+    if not dataset_cache or not Path(dataset_cache).exists():
+        raise HTTPException(status_code=404, detail="Dataset file not found")
+
+    file_path = Path(dataset_cache)
+    file_ext = file_path.suffix.lower()
+
+    # 分析前 50 行来推断字段类型
+    sample_rows = []
+    try:
+        if file_ext == ".jsonl":
+            with open(file_path, "r", encoding="utf-8") as f:
+                for i, line in enumerate(f):
+                    if i >= 50:
+                        break
+                    line = line.strip()
+                    if line:
+                        sample_rows.append(json.loads(line))
+        elif file_ext == ".json":
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                sample_rows = data[:50]
+            else:
+                sample_rows = [data]
+        elif file_ext == ".csv":
+            import pandas as pd
+            df = pd.read_csv(file_path, nrows=50)
+            sample_rows = df.to_dict(orient="records")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+
+    if not sample_rows:
+        return {"fields": [], "suggestions": {}}
+
+    # 收集所有字段
+    all_fields = set()
+    for row in sample_rows:
+        if isinstance(row, dict):
+            all_fields.update(row.keys())
+
+    # 智能推断字段类型
+    suggestions = {
+        "prompt_fields": [],  # 可能是 prompt/question 的字段
+        "target_fields": [],  # 可能是 target/answer 的字段
+        "context_fields": [],  # 可能是 context 的字段
+        "field_types": {},  # 每个字段的推断类型
+    }
+
+    # 用于识别的关键词
+    prompt_keywords = ["prompt", "question", "query", "input", "problem", "instruction", "ask"]
+    target_keywords = ["answer", "response", "target", "output", "solution", "label", "ground_truth", "gold"]
+    context_keywords = ["context", "passage", "document", "article", "background", "reference"]
+
+    for field in all_fields:
+        field_lower = field.lower()
+
+        # 推断是否是 prompt 字段
+        for kw in prompt_keywords:
+            if kw in field_lower:
+                suggestions["prompt_fields"].append({"field": field, "reason": f"包含关键词 '{kw}'"})
+                break
+
+        # 推断是否是 target 字段
+        for kw in target_keywords:
+            if kw in field_lower:
+                suggestions["target_fields"].append({"field": field, "reason": f"包含关键词 '{kw}'"})
+                break
+
+        # 推断是否是 context 字段
+        for kw in context_keywords:
+            if kw in field_lower:
+                suggestions["context_fields"].append({"field": field, "reason": f"包含关键词 '{kw}'"})
+                break
+
+        # 分析字段值类型
+        sample_values = [row.get(field) for row in sample_rows if isinstance(row, dict) and field in row]
+        if sample_values:
+            first_val = sample_values[0]
+            if isinstance(first_val, str):
+                avg_len = sum(len(str(v)) for v in sample_values if v) / max(len([v for v in sample_values if v]), 1)
+                suggestions["field_types"][field] = {
+                    "type": "string",
+                    "avg_length": round(avg_len, 1),
+                    "sample": str(first_val)[:200] if first_val else None
+                }
+            elif isinstance(first_val, list):
+                suggestions["field_types"][field] = {
+                    "type": "list",
+                    "sample": first_val[:3] if first_val else []
+                }
+            elif isinstance(first_val, dict):
+                suggestions["field_types"][field] = {
+                    "type": "object",
+                    "keys": list(first_val.keys())[:10]
+                }
+            elif isinstance(first_val, (int, float)):
+                suggestions["field_types"][field] = {
+                    "type": "number",
+                    "sample": first_val
+                }
+            else:
+                suggestions["field_types"][field] = {
+                    "type": type(first_val).__name__,
+                    "sample": str(first_val)[:100] if first_val else None
+                }
+
+    return {
+        "fields": sorted(list(all_fields)),
+        "suggestions": suggestions,
+        "sample_rows": sample_rows[:5],
+        "total_rows_analyzed": len(sample_rows)
+    }
+
+
 @app.get("/api/metrics/registry")
 def get_metrics_registry():
     """获取所有注册的 Metric 元数据"""
@@ -1530,9 +1972,10 @@ def add_bench_to_gallery(req: AddBenchRequest):
             "bench_name": req.bench_name,
             "source": "user_added",
             "aliases": [req.bench_name],
-            "category": "General",
+            "category": "Knowledge & QA",  # Use a valid default category
             "tags": [req.type],
             "description": req.description,
+            "created_at": datetime.now(timezone.utc).isoformat(),  # 添加创建时间
             "hf_meta": {
                 "bench_name": req.bench_name,
                 "hf_repo": req.bench_name,
@@ -1548,6 +1991,131 @@ def add_bench_to_gallery(req: AddBenchRequest):
         return {"status": "success", "bench": bench_data}
     else:
         raise HTTPException(status_code=400, detail=f"Failed to add bench. It may already exist.")
+
+
+# 目录用于存储上传的数据集
+UPLOAD_DIR = SERVER_DIR / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+
+@app.post("/api/benches/upload")
+async def upload_bench_dataset(
+    file: UploadFile = File(...),
+    bench_name: str = Form(...),
+    eval_type: str = Form(...),
+    description: str = Form(default=""),
+):
+    """上传本地数据集文件并添加到 gallery"""
+    import shutil
+    import aiofiles
+
+    # 验证文件类型
+    allowed_extensions = {".csv", ".jsonl", ".json", ".xlsx", ".xls", ".txt"}
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {file_ext}. Allowed: {allowed_extensions}"
+        )
+
+    # 安全化 bench_name
+    safe_bench_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in bench_name)
+    if not safe_bench_name:
+        safe_bench_name = f"uploaded_{int(time.time())}"
+
+    # 保存文件
+    saved_filename = f"{safe_bench_name}{file_ext}"
+    saved_path = UPLOAD_DIR / saved_filename
+
+    async with aiofiles.open(saved_path, "wb") as out_file:
+        content = await file.read()
+        await out_file.write(content)
+
+    # 根据文件类型推断 key_mapping
+    default_key_mapping = {
+        "input_question_key": "question",
+        "input_target_key": "answer",
+    }
+
+    # 对于 jsonl 文件，尝试读取第一行推断字段
+    if file_ext in {".jsonl", ".json"}:
+        try:
+            with open(saved_path, "r", encoding="utf-8") as f:
+                first_line = f.readline().strip()
+                if first_line:
+                    import json
+                    sample = json.loads(first_line)
+                    keys = list(sample.keys()) if isinstance(sample, dict) else []
+                    # 智能推断常见字段
+                    for k in keys:
+                        k_lower = k.lower()
+                        if any(q in k_lower for q in ["question", "query", "prompt", "input", "problem"]):
+                            default_key_mapping["input_question_key"] = k
+                        if any(a in k_lower for a in ["answer", "response", "target", "output", "solution"]):
+                            default_key_mapping["input_target_key"] = k
+        except Exception:
+            pass
+
+    # 构建完整的 bench 数据结构
+    bench_data = {
+        "bench_name": safe_bench_name,
+        "bench_table_exist": True,  # 本地上传的数据集已存在
+        "bench_source_url": f"local://uploads/{saved_filename}",
+        "bench_dataflow_eval_type": eval_type,
+        "bench_prompt_template": None,
+        "bench_keys": list(default_key_mapping.keys()),
+        "dataset_cache": str(saved_path),  # 直接指向本地文件
+        "meta": {
+            "bench_name": safe_bench_name,
+            "source": "local_upload",
+            "aliases": [safe_bench_name, bench_name],
+            "category": "Knowledge & QA",
+            "tags": [eval_type, "uploaded", "本地上传评测集"],
+            "description": description or f"Uploaded from {file.filename}",
+            "created_at": datetime.now(timezone.utc).isoformat(),  # 添加创建时间
+            "key_mapping": default_key_mapping,
+            "hf_meta": {
+                "bench_name": safe_bench_name,
+                "hf_repo": "",
+                "card_text": "",
+                "tags": [eval_type, "uploaded"],
+                "exists_on_hf": False
+            }
+        }
+    }
+
+    success = bench_registry.add_bench(bench_data, str(BENCH_GALLERY_PATH))
+    if success:
+        return {
+            "status": "success",
+            "bench": bench_data,
+            "file_path": str(saved_path),
+            "rows_estimate": _count_file_rows(saved_path, file_ext)
+        }
+    else:
+        raise HTTPException(status_code=400, detail=f"Failed to add bench. It may already exist.")
+
+
+def _count_file_rows(file_path: Path, ext: str) -> int:
+    """估算文件行数"""
+    try:
+        if ext in {".jsonl", ".txt", ".csv"}:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                return sum(1 for _ in f)
+        elif ext in {".json"}:
+            import json
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return len(data)
+                return 1
+        elif ext in {".xlsx", ".xls"}:
+            import pandas as pd
+            df = pd.read_excel(file_path)
+            return len(df)
+    except Exception:
+        pass
+    return -1
 
 
 if __name__ == "__main__":

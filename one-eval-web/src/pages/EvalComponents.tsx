@@ -717,18 +717,108 @@ interface ChatPanelProps {
     onToggleCollapse: () => void;
     lang: Lang;
     interruptToken?: string | null;
+    currentNode?: string | null;
+    evalProgress?: {
+        bench_name?: string;
+        stage?: string;
+        generated?: number;
+        total?: number;
+        percent?: number;
+    } | null;
 }
 
 const EMOJIS = ["✨", "🤖", "🚀", "💡", "🔮", "✅", "🎯"];
 
-export const ChatPanel = ({ messages, status, onSendMessage, onConfirm, onStop, isWaitingForInput, activeNodeId, isCollapsed, onToggleCollapse, lang, interruptToken }: ChatPanelProps) => {
+// 工作流节点相关辅助函数
+const NODE_ORDER = [
+    "QueryUnderstandNode",
+    "BenchSearchNode",
+    "HumanReviewNode",
+    "DatasetStructureNode",
+    "BenchConfigRecommendNode",
+    "DownloadNode",
+    "DatasetKeysNode",
+    "BenchTaskInferNode",
+    "PreEvalReviewNode",
+    "DataFlowEvalNode",
+    "MetricRecommendNode",
+    "ScoreCalcNode",
+    "ReportGenNode"
+];
+
+const getNodeDescription = (nodeName: string | null | undefined, lang: string = "zh"): string => {
+    const descriptions: Record<string, { zh: string; en: string }> = {
+        "QueryUnderstandNode": { zh: "正在理解您的评测需求...", en: "Understanding your evaluation needs..." },
+        "BenchSearchNode": { zh: "正在搜索相关基准测试...", en: "Searching for relevant benchmarks..." },
+        "HumanReviewNode": { zh: "等待您的确认...", en: "Waiting for your confirmation..." },
+        "DatasetStructureNode": { zh: "正在分析数据集结构...", en: "Analyzing dataset structure..." },
+        "BenchConfigRecommendNode": { zh: "正在推荐配置...", en: "Recommending configuration..." },
+        "DownloadNode": { zh: "正在下载数据集...", en: "Downloading dataset..." },
+        "DatasetKeysNode": { zh: "正在识别数据字段...", en: "Identifying data fields..." },
+        "BenchTaskInferNode": { zh: "正在推断评测任务...", en: "Inferring evaluation tasks..." },
+        "PreEvalReviewNode": { zh: "等待评测确认...", en: "Waiting for evaluation confirmation..." },
+        "DataFlowEvalNode": { zh: "正在执行评测...", en: "Running evaluation..." },
+        "MetricRecommendNode": { zh: "正在推荐指标...", en: "Recommending metrics..." },
+        "ScoreCalcNode": { zh: "正在计算分数...", en: "Calculating scores..." },
+        "ReportGenNode": { zh: "正在生成报告...", en: "Generating report..." },
+    };
+    const desc = descriptions[nodeName || ""];
+    return desc ? (lang === "zh" ? desc.zh : desc.en) : (lang === "zh" ? "处理中..." : "Processing...");
+};
+
+const getNodeStage = (nodeName: string | null | undefined, lang: string = "zh"): string => {
+    const stages: Record<string, { zh: string; en: string }> = {
+        "QueryUnderstandNode": { zh: "阶段 1/7: 需求理解", en: "Phase 1/7: Understanding" },
+        "BenchSearchNode": { zh: "阶段 1/7: 基准搜索", en: "Phase 1/7: Benchmark Search" },
+        "HumanReviewNode": { zh: "阶段 1/7: 人工审核", en: "Phase 1/7: Human Review" },
+        "DatasetStructureNode": { zh: "阶段 2/7: 数据集分析", en: "Phase 2/7: Dataset Analysis" },
+        "BenchConfigRecommendNode": { zh: "阶段 2/7: 配置推荐", en: "Phase 2/7: Config Recommendation" },
+        "DownloadNode": { zh: "阶段 2/7: 数据下载", en: "Phase 2/7: Data Download" },
+        "DatasetKeysNode": { zh: "阶段 3/7: 字段识别", en: "Phase 3/7: Field Identification" },
+        "BenchTaskInferNode": { zh: "阶段 3/7: 任务推断", en: "Phase 3/7: Task Inference" },
+        "PreEvalReviewNode": { zh: "阶段 4/7: 评测确认", en: "Phase 4/7: Evaluation Review" },
+        "DataFlowEvalNode": { zh: "阶段 4/7: 评测执行", en: "Phase 4/7: Evaluation Execution" },
+        "MetricRecommendNode": { zh: "阶段 5/7: 指标推荐", en: "Phase 5/7: Metric Recommendation" },
+        "ScoreCalcNode": { zh: "阶段 6/7: 分数计算", en: "Phase 6/7: Score Calculation" },
+        "ReportGenNode": { zh: "阶段 7/7: 报告生成", en: "Phase 7/7: Report Generation" },
+    };
+    const stage = stages[nodeName || ""];
+    return stage ? (lang === "zh" ? stage.zh : stage.en) : (lang === "zh" ? "处理中" : "Processing");
+};
+
+const getOverallProgress = (nodeName: string | null | undefined, evalProgress?: { percent?: number } | null): number => {
+    if (!nodeName) return 0;
+
+    // 如果有评测进度，优先使用
+    if (evalProgress?.percent !== undefined && nodeName === "DataFlowEvalNode") {
+        // 评测节点占总进度的 40%，前面节点占 40%，后面占 20%
+        const baseProgress = 40;
+        return baseProgress + (evalProgress.percent * 0.4);
+    }
+
+    const idx = NODE_ORDER.indexOf(nodeName);
+    if (idx === -1) return 10;
+
+    // 根据节点位置计算总进度
+    const progressPerNode = 100 / NODE_ORDER.length;
+    return Math.min(95, (idx + 1) * progressPerNode);
+};
+
+const isNodeCompleted = (currentNode: string | null | undefined, targetNode: string): boolean => {
+    if (!currentNode) return false;
+    const currentIdx = NODE_ORDER.indexOf(currentNode);
+    const targetIdx = NODE_ORDER.indexOf(targetNode);
+    return currentIdx > targetIdx;
+};
+
+export const ChatPanel = ({ messages, status, onSendMessage, onConfirm, onStop, isWaitingForInput, activeNodeId, isCollapsed, onToggleCollapse, lang, interruptToken, currentNode, evalProgress }: ChatPanelProps) => {
     const [input, setInput] = React.useState("");
     const [dismissedInterrupts, setDismissedInterrupts] = React.useState<string[]>([]);
     const tt = (zh: string, en: string) => (lang === "zh" ? zh : en);
     const confirmText = activeNodeId?.includes("PreEvalReviewNode")
         ? tt("请先在执行阶段检查目标模型与评测参数，确认无误后点击批准开始评测。", "Please review the target model and evaluation parameters in the Execution Phase, then approve to start evaluation.")
         : tt("我已准备好基准配置，请检查流程块中的高亮参数。", "I've prepared the benchmark configuration. Please review the highlighted parameters in the workflow blocks.");
-    
+
     const handleConfirm = () => {
         if (interruptToken) {
             setDismissedInterrupts(prev => prev.includes(interruptToken) ? prev : [...prev, interruptToken]);
@@ -749,7 +839,7 @@ export const ChatPanel = ({ messages, status, onSendMessage, onConfirm, onStop, 
         onSendMessage(input);
         setInput("");
     };
-    
+
     const getEmojiForMessage = (messageId: string) => {
         let hash = 0;
         for (let i = 0; i < messageId.length; i++) {
@@ -859,10 +949,93 @@ export const ChatPanel = ({ messages, status, onSendMessage, onConfirm, onStop, 
                         )}
                         
                         {status === "running" && (
-                             <div className="self-start flex items-center gap-2 text-xs text-slate-400 pl-2 bg-slate-50/50 px-3 py-1.5 rounded-full border border-slate-100">
-                                 <Loader2 className="w-3 h-3 animate-spin text-blue-500" /> 
-                                 <span>{tt("工作流执行中...", "Processing workflow...")}</span>
-                             </div>
+                             <motion.div
+                                 initial={{ opacity: 0, y: 10 }}
+                                 animate={{ opacity: 1, y: 0 }}
+                                 className="self-start w-full pr-8"
+                             >
+                                 <div className="bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-100 rounded-2xl p-4 shadow-sm">
+                                     <div className="flex items-center gap-3 mb-3">
+                                         <div className="w-8 h-8 rounded-lg bg-blue-500 flex items-center justify-center">
+                                             <Loader2 className="w-4 h-4 text-white animate-spin" />
+                                         </div>
+                                         <div>
+                                             <div className="font-semibold text-slate-800 text-sm">{tt("工作流执行中", "Workflow Running")}</div>
+                                             <div className="text-xs text-slate-500">{getNodeDescription(currentNode)}</div>
+                                         </div>
+                                     </div>
+
+                                     {/* 进度条和阶段 */}
+                                     <div className="space-y-2">
+                                         <div className="flex items-center justify-between text-xs">
+                                             <span className="text-slate-600">{getNodeStage(currentNode)}</span>
+                                             {evalProgress && (
+                                                 <span className="text-blue-600 font-medium">
+                                                     {evalProgress.percent ? `${Math.round(evalProgress.percent)}%` : ""}
+                                                 </span>
+                                             )}
+                                         </div>
+
+                                         {/* 主进度条 */}
+                                         <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+                                             <div
+                                                 className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full transition-all duration-300"
+                                                 style={{ width: `${getOverallProgress(currentNode, evalProgress)}%` }}
+                                             />
+                                         </div>
+
+                                         {/* 评测进度详情 */}
+                                         {evalProgress && (
+                                             <div className="mt-3 p-2 bg-white/50 rounded-lg text-xs space-y-1">
+                                                 {evalProgress.bench_name && (
+                                                     <div className="flex items-center justify-between">
+                                                         <span className="text-slate-500">{tt("当前评测集", "Current Bench")}</span>
+                                                         <span className="font-medium text-slate-700">{evalProgress.bench_name}</span>
+                                                     </div>
+                                                 )}
+                                                 {evalProgress.stage && (
+                                                     <div className="flex items-center justify-between">
+                                                         <span className="text-slate-500">{tt("阶段", "Stage")}</span>
+                                                         <span className="font-medium text-slate-700">{evalProgress.stage}</span>
+                                                     </div>
+                                                 )}
+                                                 {evalProgress.generated !== undefined && evalProgress.total && (
+                                                     <div className="flex items-center justify-between">
+                                                         <span className="text-slate-500">{tt("进度", "Progress")}</span>
+                                                         <span className="font-medium text-slate-700">{evalProgress.generated} / {evalProgress.total}</span>
+                                                     </div>
+                                                 )}
+                                             </div>
+                                         )}
+
+                                         {/* 节点步骤指示器 */}
+                                         <div className="flex items-center gap-1 mt-3">
+                                             {["QueryUnderstandNode", "BenchSearchNode", "DownloadNode", "DataFlowEvalNode", "ScoreCalcNode"].map((node, idx) => (
+                                                 <div key={node} className="flex items-center">
+                                                     <div className={cn(
+                                                         "w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold transition-all",
+                                                         isNodeCompleted(currentNode, node)
+                                                             ? "bg-emerald-500 text-white"
+                                                             : node === currentNode
+                                                                 ? "bg-blue-500 text-white ring-2 ring-blue-300"
+                                                                 : "bg-slate-200 text-slate-400"
+                                                     )}>
+                                                         {isNodeCompleted(currentNode, node) ? "✓" : idx + 1}
+                                                     </div>
+                                                     {idx < 4 && (
+                                                         <div className={cn(
+                                                             "w-4 h-0.5 transition-all",
+                                                             isNodeCompleted(currentNode, ["QueryUnderstandNode", "BenchSearchNode", "DownloadNode", "DataFlowEvalNode"][idx])
+                                                                 ? "bg-emerald-500"
+                                                                 : "bg-slate-200"
+                                                         )} />
+                                                     )}
+                                                 </div>
+                                             ))}
+                                         </div>
+                                     </div>
+                                 </div>
+                             </motion.div>
                         )}
                     </div>
 

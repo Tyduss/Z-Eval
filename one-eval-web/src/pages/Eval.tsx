@@ -59,10 +59,24 @@ export const Eval = () => {
       return v === "manual" ? "manual" : "agent";
   });
   const [query, setQuery] = useState("");
-  const [threadId, setThreadId] = useState<string | null>(null);
-  const [status, setStatus] = useState<StatusResponse["status"]>("idle");
-  const [state, setState] = useState<WorkflowState | null>(null);
-  const [currentNode, setCurrentNode] = useState<string | null>(null);
+  // Persist task state to localStorage so switching tabs doesn't lose progress
+  const [threadId, setThreadId] = useState<string | null>(() => {
+      const saved = localStorage.getItem("oneEval.runningTask.threadId");
+      return saved || null;
+  });
+  const [status, setStatus] = useState<StatusResponse["status"]>(() => {
+      const saved = localStorage.getItem("oneEval.runningTask.status");
+      return (saved as StatusResponse["status"]) || "idle";
+  });
+  const [state, setState] = useState<WorkflowState | null>(() => {
+      try {
+          const saved = localStorage.getItem("oneEval.runningTask.state");
+          return saved ? JSON.parse(saved) : null;
+      } catch { return null; }
+  });
+  const [currentNode, setCurrentNode] = useState<string | null>(() => {
+      return localStorage.getItem("oneEval.runningTask.currentNode") || null;
+  });
   const [interruptToken, setInterruptToken] = useState<string | null>(null);
   const [evalProgress, setEvalProgress] = useState<StatusResponse["eval_progress"]>(null);
   
@@ -129,11 +143,20 @@ export const Eval = () => {
       setAddingMetricBench(null);
       setMetricSearch("");
   };
-  
-  // Chat State
-  const [messages, setMessages] = useState<ChatMessage[]>([
-      { id: "init", role: "ai", content: t({ zh: "你好！请先描述你的评测目标，我们将自动开始流程。", en: "Hello! Describe your evaluation task to get started." }), timestamp: Date.now() }
-  ]);
+
+  // Chat State - persist to localStorage for history
+  const [messages, setMessages] = useState<ChatMessage[]>(() => {
+      try {
+          const saved = localStorage.getItem("oneEval.runningTask.messages");
+          if (saved) {
+              const parsed = JSON.parse(saved);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                  return parsed;
+              }
+          }
+      } catch {}
+      return [{ id: "init", role: "ai", content: t({ zh: "你好！请先描述你的评测目标，我们将自动开始流程。", en: "Hello! Describe your evaluation task to get started." }), timestamp: Date.now() }];
+  });
 
   useEffect(() => {
       setMessages(prev => prev.map(m => m.id === "init"
@@ -155,6 +178,42 @@ export const Eval = () => {
   useEffect(() => {
       localStorage.setItem("oneEval.workMode", workMode);
   }, [workMode]);
+
+  // Persist running task state to localStorage
+  useEffect(() => {
+      if (threadId && status !== "idle" && status !== "completed" && status !== "failed" && status !== "stopped") {
+          localStorage.setItem("oneEval.runningTask.threadId", threadId);
+          localStorage.setItem("oneEval.runningTask.status", status);
+          if (state) localStorage.setItem("oneEval.runningTask.state", JSON.stringify(state));
+          if (currentNode) localStorage.setItem("oneEval.runningTask.currentNode", currentNode);
+      } else if (status === "completed" || status === "failed" || status === "stopped") {
+          // Clear persisted state when task finishes
+          localStorage.removeItem("oneEval.runningTask.threadId");
+          localStorage.removeItem("oneEval.runningTask.status");
+          localStorage.removeItem("oneEval.runningTask.state");
+          localStorage.removeItem("oneEval.runningTask.currentNode");
+          // Clear chat messages when task finishes
+          localStorage.removeItem("oneEval.runningTask.messages");
+      }
+  }, [threadId, status, state, currentNode]);
+
+  // Persist chat messages to localStorage
+  // 1. Save to runningTask for current session recovery
+  // 2. Save to conversations dict for history browsing
+  useEffect(() => {
+      if (messages.length > 1) { // Only save if there's real conversation (beyond init message)
+          localStorage.setItem("oneEval.runningTask.messages", JSON.stringify(messages));
+
+          // Also save to conversations history if we have a threadId
+          if (threadId) {
+              try {
+                  const conversations = JSON.parse(localStorage.getItem("oneEval.conversations") || "{}");
+                  conversations[threadId] = messages;
+                  localStorage.setItem("oneEval.conversations", JSON.stringify(conversations));
+              } catch {}
+          }
+      }
+  }, [messages, threadId]);
 
   useEffect(() => {
       if (threadId) return;
@@ -389,7 +448,7 @@ export const Eval = () => {
   const handleStart = async (userQuery: string) => {
     if (!userQuery) return;
     setQuery(userQuery);
-    
+
     // Add User Message
     setMessages(prev => [...prev, { id: Date.now().toString(), role: "user", content: userQuery, timestamp: Date.now() }]);
 
@@ -544,16 +603,48 @@ export const Eval = () => {
   
   const loadHistory = (item: HistoryItem) => {
       setThreadId(item.thread_id);
-      setStatus("idle"); 
       setQuery(item.user_query);
-      // Reset Chat
-      setMessages([
-          { id: "init", role: "ai", content: t({ zh: "已载入历史会话。", en: "Loaded past session." }), timestamp: Date.now() },
-          { id: "hist", role: "user", content: item.user_query, timestamp: Date.now() }
-      ]);
-      
+
+      // Try to load saved conversation for this thread
+      try {
+          const savedConversations = JSON.parse(localStorage.getItem("oneEval.conversations") || "{}");
+          const savedMessages = savedConversations[item.thread_id];
+          if (Array.isArray(savedMessages) && savedMessages.length > 0) {
+              setMessages(savedMessages);
+          } else {
+              // Fallback: show minimal history
+              setMessages([
+                  { id: "init", role: "ai", content: t({ zh: "已载入历史会话。", en: "Loaded past session." }), timestamp: Date.now() },
+                  { id: "hist", role: "user", content: item.user_query, timestamp: Date.now() }
+              ]);
+          }
+      } catch {
+          setMessages([
+              { id: "init", role: "ai", content: t({ zh: "已载入历史会话。", en: "Loaded past session." }), timestamp: Date.now() },
+              { id: "hist", role: "user", content: item.user_query, timestamp: Date.now() }
+          ]);
+      }
+
+      // Fetch current status from backend
       axios.get(`${apiBaseUrl}/api/workflow/status/${item.thread_id}`).then(res => {
-          setStatus(res.data.status);
+          const backendStatus = res.data.status;
+          // For history items, only allow viewing, not auto-resuming
+          // Set status to 'stopped' for interrupted tasks to prevent polling
+          if (backendStatus === "interrupted" || backendStatus === "running") {
+              // Show as stopped for viewing purposes - user can manually resume if needed
+              setStatus("stopped");
+              // Add a message to indicate this is a historical view
+              setMessages(prev => {
+                  const lastMsg = prev[prev.length - 1];
+                  const infoText = t({ zh: "（历史记录查看模式，任务已暂停）", en: "(History view mode, task paused)" });
+                  if (lastMsg?.content !== infoText) {
+                      return [...prev, { id: Date.now().toString(), role: "system", content: infoText, timestamp: Date.now() }];
+                  }
+                  return prev;
+              });
+          } else {
+              setStatus(backendStatus);
+          }
           setState(res.data.state_values);
       });
   };
@@ -561,7 +652,7 @@ export const Eval = () => {
   const handleNewTask = () => {
       // Disconnect from current session
       setThreadId(null);
-      
+
       // Reset all states
       setStatus("idle");
       setQuery("");
@@ -569,7 +660,14 @@ export const Eval = () => {
       setCurrentNode(null);
       setActiveNode(null);
       setEditBenches([]);
-      
+
+      // Clear running task state from localStorage
+      localStorage.removeItem("oneEval.runningTask.threadId");
+      localStorage.removeItem("oneEval.runningTask.status");
+      localStorage.removeItem("oneEval.runningTask.state");
+      localStorage.removeItem("oneEval.runningTask.currentNode");
+      localStorage.removeItem("oneEval.runningTask.messages");
+
       // Reset Chat
       setMessages([
           { id: "init", role: "ai", content: t({ zh: "你好！请先描述你的评测目标，我们将自动开始流程。", en: "Hello! Describe your evaluation task to get started." }), timestamp: Date.now() }
@@ -607,7 +705,14 @@ export const Eval = () => {
           await axios.delete(`${apiBaseUrl}/api/workflow/history/${threadIdToDelete}`);
           setHistory(prev => prev.filter(h => h.thread_id !== threadIdToDelete));
           setDeleteConfirmId(null);
-          
+
+          // Also delete saved conversation for this thread
+          try {
+              const conversations = JSON.parse(localStorage.getItem("oneEval.conversations") || "{}");
+              delete conversations[threadIdToDelete];
+              localStorage.setItem("oneEval.conversations", JSON.stringify(conversations));
+          } catch {}
+
           // If we deleted the active thread, reset
           if (threadId === threadIdToDelete) {
               handleNewTask();
@@ -732,9 +837,12 @@ export const Eval = () => {
   };
 
   const handleManualStart = async () => {
-      const targetModelPath = manualModelPath || selectedModel?.path || "";
-      if (!targetModelPath) {
-          setMessages(prev => [...prev, { id: Date.now().toString(), role: "system", content: t({ zh: "手动模式：请先填写模型路径。", en: "Manual mode: please set a model path." }), timestamp: Date.now() }]);
+      // Check if we have models to evaluate
+      const hasSelectedModels = selectedModels.length > 0;
+      const hasManualModel = manualModelPath || selectedModel?.path;
+
+      if (!hasSelectedModels && !hasManualModel) {
+          setMessages(prev => [...prev, { id: Date.now().toString(), role: "system", content: t({ zh: "手动模式：请先选择模型或填写模型路径。", en: "Manual mode: please select models or set a model path." }), timestamp: Date.now() }]);
           return;
       }
       if (!manualBenches.length) {
@@ -749,30 +857,64 @@ export const Eval = () => {
           meta: b.meta || {}
       }));
 
-      const modelPayload: any = {
-          model_name_or_path: targetModelPath,
-          is_api: false,
-          temperature: evalParams.temperature,
-          top_p: evalParams.top_p,
-          top_k: evalParams.top_k,
-          repetition_penalty: evalParams.repetition_penalty,
-          max_tokens: evalParams.max_tokens,
-          tensor_parallel_size: evalParams.tensor_parallel_size,
-          max_model_len: evalParams.max_model_len,
-          gpu_memory_utilization: evalParams.gpu_memory_utilization,
-          seed: evalParams.seed
-      };
+      // Build models payload
+      let modelsPayload: any[] = [];
+
+      if (hasSelectedModels) {
+          // Multi-model mode
+          modelsPayload = selectedModels.map((m: any) => ({
+              model_name_or_path: m.path || m.model_name_or_path,
+              is_api: m.is_api || false,
+              api_url: m.api_url,
+              api_key: m.api_key,
+              temperature: evalParams.temperature,
+              top_p: evalParams.top_p,
+              top_k: evalParams.top_k,
+              repetition_penalty: evalParams.repetition_penalty,
+              max_tokens: evalParams.max_tokens,
+              tensor_parallel_size: evalParams.tensor_parallel_size,
+              max_model_len: evalParams.max_model_len,
+              gpu_memory_utilization: evalParams.gpu_memory_utilization,
+              seed: evalParams.seed
+          }));
+      } else {
+          // Single model mode (backward compatible)
+          const targetModelPath = manualModelPath || selectedModel?.path || "";
+          modelsPayload = [{
+              model_name_or_path: targetModelPath,
+              is_api: selectedModel?.is_api || false,
+              api_url: selectedModel?.api_url,
+              api_key: selectedModel?.api_key,
+              temperature: evalParams.temperature,
+              top_p: evalParams.top_p,
+              top_k: evalParams.top_k,
+              repetition_penalty: evalParams.repetition_penalty,
+              max_tokens: evalParams.max_tokens,
+              tensor_parallel_size: evalParams.tensor_parallel_size,
+              max_model_len: evalParams.max_model_len,
+              gpu_memory_utilization: evalParams.gpu_memory_utilization,
+              seed: evalParams.seed
+          }];
+      }
 
       const res = await axios.post(`${apiBaseUrl}/api/workflow/manual_start`, {
           user_query: query || "manual eval",
-          target_model_name: selectedModel?.name || "manual",
-          target_model: modelPayload,
+          target_model_name: selectedModels[primaryModelIndex]?.name || selectedModel?.name || "manual",
+          target_models: modelsPayload,
           benches: benchesPayload
       });
 
       setThreadId(res.data.thread_id);
       setStatus("running");
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: "ai", content: t({ zh: "已启动手动评测，正在运行 DataFlowEval...", en: "Manual evaluation started. Running DataFlowEval..." }), timestamp: Date.now() }]);
+      const modelCount = res.data.model_count || modelsPayload.length;
+      setMessages(prev => [...prev, {
+          id: Date.now().toString(),
+          role: "ai",
+          content: modelCount > 1
+              ? t({ zh: `已启动手动评测，共 ${modelCount} 个模型，正在运行 DataFlowEval...`, en: `Manual evaluation started with ${modelCount} models. Running DataFlowEval...` })
+              : t({ zh: "已启动手动评测，正在运行 DataFlowEval...", en: "Manual evaluation started. Running DataFlowEval..." }),
+          timestamp: Date.now()
+      }]);
   };
 
   const handleStopWorkflow = async () => {
@@ -1077,37 +1219,90 @@ export const Eval = () => {
                        </div>
 
                        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 space-y-4">
-                           <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Model</div>
-                           <div className="grid grid-cols-12 gap-4">
-                               <div className="col-span-6">
-                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Model Preset</label>
-                                   <select
-                                       value={(selectedModel?.name ?? state?.target_model_name ?? "") as any}
-                                       onChange={(e) => {
-                                           const found = availableModels.find((m: any) => m?.name === e.target.value);
-                                           if (found) {
-                                               setSelectedModel(found);
-                                               if (found?.path) setManualModelPath(found.path);
-                                           }
-                                       }}
-                                       disabled={status === "running"}
-                                       className="w-full h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all disabled:opacity-50 disabled:bg-slate-50/50"
-                                   >
-                                       {availableModels.map((m: any) => (
-                                           <option key={m.name} value={m.name}>{m.name}</option>
-                                       ))}
-                                   </select>
-                               </div>
-                               <div className="col-span-6">
-                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Model Path</label>
-                                   <Input
-                                       value={manualModelPath}
-                                       onChange={(e) => setManualModelPath(e.target.value)}
-                                       disabled={status === "running"}
-                                       className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
-                                   />
-                               </div>
+                           <div className="flex items-center justify-between">
+                               <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">{t({ zh: "目标模型", en: "Target Models" })}</div>
+                               {selectedModels.length > 0 && (
+                                   <span className="text-[10px] font-medium text-blue-600">
+                                       {t({ zh: `已选择 ${selectedModels.length} 个模型`, en: `${selectedModels.length} models selected` })}
+                                   </span>
+                               )}
                            </div>
+                           {selectedModels.length > 0 ? (
+                               <div className="flex flex-wrap gap-2 p-3 rounded-lg border border-blue-200 bg-blue-50/30">
+                                   {selectedModels.map((m: any, idx: number) => (
+                                       <div
+                                           key={m.name}
+                                           onClick={() => {
+                                               setPrimaryModelIndex(idx);
+                                               setSelectedModel(m);
+                                               localStorage.setItem("oneEval.primaryModelIndex", String(idx));
+                                           }}
+                                           className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium cursor-pointer transition-all ${
+                                               idx === primaryModelIndex
+                                                   ? "bg-blue-100 border-2 border-blue-400 text-blue-800"
+                                                   : "bg-white border border-slate-200 text-slate-700 hover:border-blue-300"
+                                           }`}
+                                       >
+                                           {m.is_api && <span className="text-violet-500">API</span>}
+                                           <span>{m.name}</span>
+                                           {idx === primaryModelIndex && <span className="text-blue-600 text-[10px]">(主)</span>}
+                                       </div>
+                                   ))}
+                                   <button
+                                       type="button"
+                                       onClick={() => {
+                                           setSelectedModels([]);
+                                           setSelectedModel(null);
+                                           setManualModelPath("");
+                                           localStorage.removeItem("oneEval.selectedModels");
+                                       }}
+                                       className="px-2 py-1 rounded-md text-xs text-red-500 hover:bg-red-50 transition-colors"
+                                       disabled={status === "running"}
+                                   >
+                                       {t({ zh: "清除选择", en: "Clear" })}
+                                   </button>
+                               </div>
+                           ) : (
+                               <div className="grid grid-cols-12 gap-4">
+                                   <div className="col-span-6">
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">{t({ zh: "模型预设", en: "Model Preset" })}</label>
+                                       <select
+                                           title={t({ zh: "选择模型预设", en: "Select model preset" })}
+                                           value={(selectedModel?.name ?? "") as any}
+                                           onChange={(e) => {
+                                               const found = availableModels.find((m: any) => m?.name === e.target.value);
+                                               if (found) {
+                                                   setSelectedModel(found);
+                                                   if (found?.path) setManualModelPath(found.path);
+                                               }
+                                           }}
+                                           disabled={status === "running"}
+                                           className="w-full h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all disabled:opacity-50 disabled:bg-slate-50/50"
+                                       >
+                                           <option value="">{t({ zh: "选择模型...", en: "Select model..." })}</option>
+                                           {availableModels.map((m: any) => (
+                                               <option key={m.name} value={m.name}>{m.name}{m.is_api ? " (API)" : ""}</option>
+                                           ))}
+                                       </select>
+                                   </div>
+                                   <div className="col-span-6">
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">{t({ zh: "模型路径", en: "Model Path" })}</label>
+                                       <Input
+                                           value={manualModelPath}
+                                           onChange={(e) => setManualModelPath(e.target.value)}
+                                           disabled={status === "running"}
+                                           placeholder={t({ zh: "或手动输入路径", en: "Or enter path manually" })}
+                                           className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                       />
+                                   </div>
+                               </div>
+                           )}
+                           <p className="text-[10px] text-slate-400">
+                               {t({
+                                   zh: "提示：在「设置」页面勾选多个模型可进行多模型批量评测",
+                                   en: "Tip: Select multiple models in Settings page for batch evaluation"
+                               })}
+                           </p>
                        </div>
 
                        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 space-y-4">
@@ -2342,18 +2537,20 @@ export const Eval = () => {
 
        {/* --- Right Sidebar (Chat) --- */}
        <div className="h-full z-40 shadow-2xl relative flex-shrink-0">
-           <ChatPanel 
-                messages={messages} 
+           <ChatPanel
+                messages={messages}
                 status={status}
                 onSendMessage={handleStart}
                 onConfirm={handleResume}
                 onStop={handleStopWorkflow}
                 isWaitingForInput={status !== "idle"}
-                activeNodeId={activeNode} 
+                activeNodeId={activeNode}
                 isCollapsed={isChatCollapsed}
                 onToggleCollapse={() => setIsChatCollapsed(!isChatCollapsed)}
                 lang={lang}
                 interruptToken={interruptToken}
+                currentNode={currentNode}
+                evalProgress={evalProgress}
            />
        </div>
 

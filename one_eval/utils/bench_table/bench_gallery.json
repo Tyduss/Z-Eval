@@ -11093,6 +11093,46 @@
           "reasoning"
         ]
       }
+    },
+    {
+      "bench_name": "写诗测试",
+      "bench_table_exist": true,
+      "bench_source_url": "local://uploads/写诗测试.jsonl",
+      "bench_dataflow_eval_type": "other",
+      "bench_prompt_template": null,
+      "bench_keys": [
+        "input_question_key",
+        "input_target_key"
+      ],
+      "dataset_cache": "/Users/t/One-Eval/one_eval/server/uploads/写诗测试.jsonl",
+      "meta": {
+        "bench_name": "写诗测试",
+        "source": "local_upload",
+        "aliases": [
+          "写诗测试",
+          "写诗测试"
+        ],
+        "category": "Knowledge & QA",
+        "tags": [
+          "other",
+          "uploaded"
+        ],
+        "description": "写诗测试",
+        "key_mapping": {
+          "input_question_key": "prompt",
+          "input_target_key": "answer"
+        },
+        "hf_meta": {
+          "bench_name": "写诗测试",
+          "hf_repo": "",
+          "card_text": "",
+          "tags": [
+            "other",
+            "uploaded"
+          ],
+          "exists_on_hf": false
+        }
+      }
     }
   ]
 }

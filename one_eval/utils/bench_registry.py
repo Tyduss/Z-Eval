@@ -254,3 +254,44 @@ class BenchRegistry:
             del self.data[bench_name]
             del self.lower_map[bench_name.lower()]
             return False
+
+    def delete_bench(self, bench_name: str, config_path: str) -> bool:
+        """
+        从注册表和文件中删除 benchmark
+
+        Args:
+            bench_name: 要删除的 benchmark 名称
+            config_path: bench_gallery.json 文件路径
+
+        Returns:
+            成功返回 True，失败返回 False
+        """
+        # 检查是否存在
+        matched = self._match_bench_by_name_or_alias(bench_name)
+        if not matched:
+            log.warning(f"[BenchRegistry] Bench '{bench_name}' not found")
+            return False
+
+        original_name = matched
+
+        # 从内存中删除
+        self.benches = [b for b in self.benches if b.get("bench_name") != original_name]
+        self.data.pop(original_name, None)
+        self.lower_map.pop(original_name.lower(), None)
+
+        # 写入文件
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                file_data = json.load(f)
+
+            if isinstance(file_data, dict) and "benches" in file_data:
+                file_data["benches"] = [b for b in file_data["benches"] if b.get("bench_name") != original_name]
+
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(file_data, f, ensure_ascii=False, indent=2)
+
+            log.info(f"[BenchRegistry] Deleted bench '{original_name}' successfully")
+            return True
+        except Exception as e:
+            log.error(f"[BenchRegistry] Failed to delete bench: {e}")
+            return False
