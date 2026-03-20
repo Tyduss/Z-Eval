@@ -673,9 +673,27 @@ export const Settings = () => {
               <div className="flex items-center justify-between">
                 <h4 className="text-sm font-medium text-slate-500 uppercase tracking-wider text-xs">{tt("已注册模型", "Registered Models")}</h4>
                 {models.length > 0 && (
-                  <div className="flex items-center gap-2 text-xs text-slate-500">
-                    <span>{tt("勾选参与评测", "Select for evaluation")}</span>
-                    <span className="text-emerald-600 font-medium">({selectedModelIdxs.size}/{models.length})</span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-slate-500">
+                      {tt("已选", "Selected")}: <span className="text-emerald-600 font-medium">{selectedModelIdxs.size}/{models.length}</span>
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        if (selectedModelIdxs.size === models.length) {
+                          setSelectedModelIdxs(new Set());
+                          localStorage.removeItem("oneEval.selectedModels");
+                        } else {
+                          const allIdxs = new Set(models.map((_, i) => i));
+                          setSelectedModelIdxs(allIdxs);
+                          localStorage.setItem("oneEval.selectedModels", JSON.stringify([...allIdxs]));
+                        }
+                      }}
+                      className="text-xs"
+                    >
+                      {selectedModelIdxs.size === models.length ? tt("取消全选", "Deselect All") : tt("全选", "Select All")}
+                    </Button>
                   </div>
                 )}
               </div>
