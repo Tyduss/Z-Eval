@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 from one_eval.core.node import BaseNode
 from one_eval.core.state import NodeState, ModelConfig
@@ -27,8 +28,8 @@ class DataFlowEvalNode(BaseNode):
     Step4: DataFlowEvalNode
     - 遍历 benches
     - 检查 eval_status
-    - 准备 ModelConfig
-    - 调用 DataFlowEvalTool
+    - 准备 ModelConfig（支持多模型）
+    - 调用 DataFlowEvalTool（并行执行多模型）
     - 更新状态
     """
 
@@ -38,6 +39,28 @@ class DataFlowEvalNode(BaseNode):
         # 默认输出目录
         self.output_root = os.path.join(os.getcwd(), "cache", "eval_results")
         self._tool = DataFlowEvalTool(output_root=self.output_root)
+
+    def _get_model_configs(self, state: NodeState) -> List[ModelConfig]:
+        """获取模型配置列表，优先使用 target_models，否则回退到 target_model"""
+        models = getattr(state, "target_models", None) or []
+        if models:
+            return models
+
+        # 单模型回退
+        if state.target_model:
+            return [state.target_model]
+
+        # 兜底：从 target_model_name 推断
+        if state.target_model_name:
+            self.logger.info(f"Using default config for model: {state.target_model_name}")
+            return [ModelConfig(
+                model_name_or_path=state.target_model_name,
+                is_api=False,
+                tensor_parallel_size=1,
+                max_tokens=2048
+            )]
+
+        return []
 
     async def run(self, state: NodeState, config: Optional[Any] = None) -> NodeState:
         state.current_node = self.name
@@ -53,23 +76,15 @@ class DataFlowEvalNode(BaseNode):
             self.logger.warning("[DataFlowEvalNode] state.benches 为空")
             return state
 
-        # 1. 准备模型配置
-        # 优先使用 state.target_model，如果没有则尝试从 target_model 推断
-        model_config = state.target_model
-        
-        if not model_config:
-            # 简单的自动配置兜底
-            if state.target_model:
-                self.logger.info(f"Using default config for model: {state.target_model}")
-                model_config = ModelConfig(
-                    model_name_or_path=state.target_model,
-                    is_api=False, # 默认为本地模型
-                    tensor_parallel_size=1,
-                    max_tokens=2048
-                )
-            else:
-                self.logger.error("No target_model or target_model found!")
-                return state
+        # 1. 获取模型配置列表
+        model_configs = self._get_model_configs(state)
+        if not model_configs:
+            self.logger.error("No target_model(s) found!")
+            return state
+
+        is_multi_model = len(model_configs) > 1
+        if is_multi_model:
+            self.logger.info(f"Multi-model evaluation: {[m.model_name_or_path for m in model_configs]}")
 
         tool = self._tool
         cursor = int(getattr(state, "eval_cursor", 0) or 0)
@@ -80,10 +95,22 @@ class DataFlowEvalNode(BaseNode):
 
         bench = benches[cursor]
 
-        if bench.eval_status == "success" and bench.meta and bench.meta.get("eval_result"):
-            self.logger.info(f"[{bench.bench_name}] 已评测成功，跳过")
-            state.eval_cursor = cursor + 1
-            return state
+        # 检查是否已完成所有模型的评测
+        if bench.eval_status == "success" and bench.meta:
+            existing_results = bench.meta.get("eval_results", {})
+            if is_multi_model:
+                # 多模型模式下检查是否所有模型都已完成
+                all_done = all(m.model_name_or_path in existing_results for m in model_configs)
+                if all_done:
+                    self.logger.info(f"[{bench.bench_name}] 所有模型已评测完成，跳过")
+                    state.eval_cursor = cursor + 1
+                    return state
+            else:
+                # 单模型模式
+                if bench.meta.get("eval_result"):
+                    self.logger.info(f"[{bench.bench_name}] 已评测成功，跳过")
+                    state.eval_cursor = cursor + 1
+                    return state
 
         if not bench.dataset_cache:
             self.logger.warning(f"[{bench.bench_name}] 缺少 dataset_cache，跳过")
@@ -132,26 +159,83 @@ class DataFlowEvalNode(BaseNode):
                 },
             )
 
-        try:
-            self.logger.info(f"[{bench.bench_name}] 开始评测... Type={bench.bench_dataflow_eval_type}")
-            bench.eval_status = "running"
+        # === 执行评测 ===
+        if not bench.meta:
+            bench.meta = {}
+
+        # 初始化 eval_results 字典（多模型结果存储）
+        if "eval_results" not in bench.meta:
+            bench.meta["eval_results"] = {}
+
+        bench.eval_status = "running"
+        bench.meta["eval_progress"] = {
+            "bench_name": bench.bench_name,
+            "stage": "queued",
+            "generated": 0,
+            "total": 0,
+            "percent": 0.0,
+            "models": [m.model_name_or_path for m in model_configs],
+            "completed_models": [],
+        }
+
+        # 并行执行多模型评测
+        if is_multi_model:
+            results = await self._run_multi_model_eval(
+                bench, model_configs, tool, thread_id
+            )
+        else:
+            # 单模型直接执行
+            results = await self._run_single_model_eval(
+                bench, model_configs[0], tool, thread_id
+            )
+
+        # 处理结果
+        all_success = True
+        for model_name, result in results.items():
+            if result.get("success"):
+                if is_multi_model:
+                    bench.meta["eval_results"][model_name] = {
+                        "stats": result["stats"],
+                        "detail_path": result["detail_path"],
+                    }
+                else:
+                    bench.meta["eval_result"] = result["stats"]
+                    bench.meta["eval_detail_path"] = result["detail_path"]
+            else:
+                all_success = False
+                self.logger.error(f"[{bench.bench_name}] 模型 {model_name} 评测失败: {result.get('error')}")
+
+        if all_success:
+            bench.eval_status = "success"
+            # 使用第一个模型的结果进行 key mapping 设置
+            first_result = list(results.values())[0]
+            if first_result.get("success"):
+                self._set_key_mapping(bench, first_result.get("key_mapping", {}))
+            self.logger.info(f"[{bench.bench_name}] 评测完成")
+        else:
+            bench.eval_status = "failed"
+            bench.meta["eval_error"] = "部分模型评测失败"
+
+        state.eval_cursor = cursor + 1
+        if thread_id and state.eval_cursor >= len(benches):
+            clear_progress(thread_id)
+        return state
+
+    async def _run_single_model_eval(
+        self, bench, model_config: ModelConfig, tool, thread_id: Optional[str]
+    ) -> dict:
+        """执行单模型评测"""
+        model_name = model_config.model_name_or_path
+
+        def _on_progress(p: dict):
             if not bench.meta:
                 bench.meta = {}
-            bench.meta["eval_progress"] = {
-                "bench_name": bench.bench_name,
-                "stage": "queued",
-                "generated": 0,
-                "total": 0,
-                "percent": 0.0,
-            }
+            bench.meta["eval_progress"] = p
+            if thread_id:
+                set_progress(thread_id, p)
 
-            def _on_progress(p: dict):
-                if not bench.meta:
-                    bench.meta = {}
-                bench.meta["eval_progress"] = p
-                if thread_id:
-                    set_progress(thread_id, p)
-
+        try:
+            self.logger.info(f"[{bench.bench_name}] 开始评测模型: {model_name}")
             result = tool.run_eval(bench, model_config, progress_callback=_on_progress)
 
             if thread_id:
@@ -163,115 +247,105 @@ class DataFlowEvalNode(BaseNode):
                     "percent": 100.0,
                 })
 
-            stats = result["stats"]
-            bench.meta["eval_result"] = stats
-            bench.meta["eval_detail_path"] = result["detail_path"]
-
-            # === Pass Key Mapping to MetricRunner ===
-            final_key_mapping = result.get("key_mapping", {})
-            eval_type = bench.bench_dataflow_eval_type
-
-            # 1. 确定 Pred Key (预测列)
-            # 逻辑：优先查看映射中是否指定了 'input_pred_key'，如果没有，则默认为 'generated_ans'
-            # 这兼容了 Pipeline 中生成的结果，也兼容了用户手动指定列名的情况
-            default_pred_key = "generated_ans"
-            mapped_pred_key = final_key_mapping.get("input_pred_key")
-            pred_key = mapped_pred_key if mapped_pred_key else default_pred_key
-
-            # 2. 确定 Ref Key (参考答案列)
-            ref_key = None
-
-            if eval_type == "key2_qa":
-                # 问答（单参考）：取 target
-                ref_key = final_key_mapping.get("input_target_key")
-
-            elif eval_type == "key2_q_ma":
-                # 问答（多参考）：取 targets
-                ref_key = final_key_mapping.get("input_targets_key")
-
-            elif eval_type == "key3_q_choices_a":
-                # 单选：取 label (A/B/C)
-                ref_key = final_key_mapping.get("input_label_key")
-                # 选择题优先用 ll-choice 的预测列
-                pred_key = "eval_pred"
-
-            elif eval_type == "key3_q_choices_as":
-                # 多选：取 labels 集合
-                ref_key = final_key_mapping.get("input_labels_key")
-                pred_key = "eval_pred"
-
-            elif eval_type == "key3_q_a_rejected":
-                # 偏好对比：通常将 "better" 视为正例 (Positive Reference)
-                # 注意：MetricRunner 可能还需要 rejected_key，但通常 ref_key 指向 ground truth
-                ref_key = final_key_mapping.get("input_better_key")
-
-            elif eval_type == "key1_text_score":
-                # 文本评分 (PPL)：属于无监督评估，没有 Ref
-                # 特殊情况：此时我们要评估的对象(pred)其实就是输入的 text 列
-                ref_key = None
-                # 如果映射里指定了 input_text_key，它就是我们要评估的内容
-                if final_key_mapping.get("input_text_key"):
-                    pred_key = final_key_mapping.get("input_text_key")
-
-            # 3. 写入 Meta
-            if ref_key:
-                bench.meta["ref_key"] = ref_key
-                self.logger.info(f"[{bench.bench_name}] Set ref_key='{ref_key}' based on type '{eval_type}'")
-
-            bench.meta["pred_key"] = pred_key
-            self.logger.info(f"[{bench.bench_name}] Set pred_key='{pred_key}'")
-
-            bench.eval_status = "success"
-
-            total_samples = stats.get("total_samples", 0)
-            accuracy = stats.get("accuracy", 0)
-            score = stats.get("score", 0)
-            valid_samples = stats.get("valid_samples", 0)
-
-            if total_samples > 0 and (accuracy == 0 and score == 0):
-                reason = "Score is 0. Possibly a hidden test set without public labels."
-                if valid_samples == 0:
-                    reason += " (No valid samples found for evaluation)"
-
-                bench.meta["eval_abnormality"] = {
-                    "is_abnormal": True,
-                    "reason": reason,
-                    "type": "zero_score"
-                }
-                self.logger.warning(f"[{bench.bench_name}] Detected abnormality: {reason}")
-
-            self.logger.info(f"[{bench.bench_name}] 评测完成。Stats: {result['stats']}")
-
+            return {model_name: {
+                "success": True,
+                "stats": result["stats"],
+                "detail_path": result["detail_path"],
+                "key_mapping": result.get("key_mapping", {}),
+            }}
         except Exception as e:
-            self.logger.error(f"[{bench.bench_name}] 评测失败: {e}")
-            bench.eval_status = "failed"
-            if not bench.meta:
-                bench.meta = {}
-            bench.meta["eval_error"] = str(e)
-            bench.meta["eval_progress"] = {
-                "bench_name": bench.bench_name,
-                "stage": "failed",
-                "generated": int((bench.meta.get("eval_progress") or {}).get("generated") or 0),
-                "total": int((bench.meta.get("eval_progress") or {}).get("total") or 0),
-                "percent": float((bench.meta.get("eval_progress") or {}).get("percent") or 0.0),
-            }
-            if thread_id:
-                set_progress(thread_id, bench.meta["eval_progress"])
-            err_text = str(e)
-            approved = list(getattr(state, "approved_warning_ids", []) or [])
-            confirm_id = "PreEvalReviewNode_confirm"
-            approved = [x for x in approved if x != confirm_id]
-            return Command(
-                goto="PreEvalReviewNode",
-                update={
-                    "approved_warning_ids": approved,
-                    "waiting_for_human": True,
-                    "error_flag": True,
-                    "error_msg": f"[{bench.bench_name}] DataFlow评测失败，请修复配置后重试: {err_text}",
-                },
-            )
+            self.logger.error(f"[{bench.bench_name}] 模型 {model_name} 评测失败: {e}")
+            return {model_name: {"success": False, "error": str(e)}}
 
-        state.eval_cursor = cursor + 1
-        if thread_id and state.eval_cursor >= len(benches):
-            clear_progress(thread_id)
-        return state
+    async def _run_multi_model_eval(
+        self, bench, model_configs: List[ModelConfig], tool, thread_id: Optional[str]
+    ) -> dict:
+        """并行执行多模型评测"""
+        self.logger.info(f"[{bench.bench_name}] 并行评测 {len(model_configs)} 个模型")
+
+        async def eval_single(model_config: ModelConfig) -> tuple:
+            """单个模型评测的异步任务"""
+            model_name = model_config.model_name_or_path
+
+            def _on_progress(p: dict):
+                # 多模型时只更新第一个模型的进度（简化处理）
+                if model_config == model_configs[0] and thread_id:
+                    set_progress(thread_id, p)
+
+            try:
+                # 在线程池中运行同步的评测方法
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: tool.run_eval(bench, model_config, progress_callback=_on_progress)
+                )
+
+                # 更新完成的模型列表
+                completed = bench.meta.get("eval_progress", {}).get("completed_models", [])
+                completed.append(model_name)
+                bench.meta["eval_progress"]["completed_models"] = completed
+
+                return model_name, {
+                    "success": True,
+                    "stats": result["stats"],
+                    "detail_path": result["detail_path"],
+                    "key_mapping": result.get("key_mapping", {}),
+                }
+            except Exception as e:
+                self.logger.error(f"[{bench.bench_name}] 模型 {model_name} 评测失败: {e}")
+                return model_name, {"success": False, "error": str(e)}
+
+        # 并行执行所有模型评测
+        tasks = [eval_single(m) for m in model_configs]
+        results_list = await asyncio.gather(*tasks)
+
+        # 转换为字典
+        results = dict(results_list)
+
+        if thread_id:
+            set_progress(thread_id, {
+                "bench_name": bench.bench_name,
+                "stage": "done",
+                "generated": 0,
+                "total": 0,
+                "percent": 100.0,
+                "models": [m.model_name_or_path for m in model_configs],
+                "completed_models": list(results.keys()),
+            })
+
+        return results
+
+    def _set_key_mapping(self, bench, final_key_mapping: dict):
+        """设置 key mapping 信息"""
+        eval_type = bench.bench_dataflow_eval_type
+
+        # 确定 Pred Key
+        default_pred_key = "generated_ans"
+        mapped_pred_key = final_key_mapping.get("input_pred_key")
+        pred_key = mapped_pred_key if mapped_pred_key else default_pred_key
+
+        # 确定 Ref Key
+        ref_key = None
+        if eval_type == "key2_qa":
+            ref_key = final_key_mapping.get("input_target_key")
+        elif eval_type == "key2_q_ma":
+            ref_key = final_key_mapping.get("input_targets_key")
+        elif eval_type == "key3_q_choices_a":
+            ref_key = final_key_mapping.get("input_label_key")
+            pred_key = "eval_pred"
+        elif eval_type == "key3_q_choices_as":
+            ref_key = final_key_mapping.get("input_labels_key")
+            pred_key = "eval_pred"
+        elif eval_type == "key3_q_a_rejected":
+            ref_key = final_key_mapping.get("input_better_key")
+        elif eval_type == "key1_text_score":
+            ref_key = None
+            if final_key_mapping.get("input_text_key"):
+                pred_key = final_key_mapping.get("input_text_key")
+
+        if ref_key:
+            bench.meta["ref_key"] = ref_key
+            self.logger.info(f"[{bench.bench_name}] Set ref_key='{ref_key}'")
+
+        bench.meta["pred_key"] = pred_key
+        self.logger.info(f"[{bench.bench_name}] Set pred_key='{pred_key}'")

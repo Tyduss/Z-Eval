@@ -372,40 +372,52 @@ export const Eval = () => {
     setMessages(prev => [...prev, { id: Date.now().toString(), role: "user", content: userQuery, timestamp: Date.now() }]);
 
     try {
-      // Fetch default model
+      // Fetch selected models
+      let targetModels: any[] = [];
       let targetModelName = "Qwen2.5-7B";
-      let targetModelPath = "/mnt/DataFlow/models/Qwen2.5-7B-Instruct";
-      let isApi = false;
-      let apiUrl: string | undefined;
-      let apiKey: string | undefined;
       try {
         const modelsRes = await axios.get(`${apiBaseUrl}/api/models`);
-        if (modelsRes.data && modelsRes.data.length > 0) {
-            const firstModel = modelsRes.data[0];
-            targetModelName = firstModel.name;
-            targetModelPath = firstModel.path;
-            isApi = firstModel.is_api || false;
-            apiUrl = firstModel.api_url;
-            apiKey = firstModel.api_key;
+        const allModels = modelsRes.data || [];
+
+        // 从 localStorage 获取选中的模型索引
+        let selectedIdxs: number[] = [];
+        try {
+          const saved = localStorage.getItem("oneEval.selectedModels");
+          if (saved) selectedIdxs = JSON.parse(saved);
+        } catch (e) {}
+
+        // 如果有选中的模型，使用选中的；否则使用第一个
+        if (selectedIdxs.length > 0) {
+          targetModels = selectedIdxs
+            .filter(i => i >= 0 && i < allModels.length)
+            .map(i => allModels[i]);
+        } else if (allModels.length > 0) {
+          targetModels = [allModels[0]];
+        }
+
+        if (targetModels.length > 0) {
+          targetModelName = targetModels.map((m: any) => m.name).join(", ");
         }
       } catch (e) {}
 
       const res = await axios.post(`${apiBaseUrl}/api/workflow/start`, {
         user_query: userQuery,
         target_model_name: targetModelName,
-        target_model_path: targetModelPath,
+        target_model_path: targetModels[0]?.path || "",
         use_rag: useRAG,
         local_count: localCount,
         hf_count: hfCount,
         language: lang,
-        is_api: isApi,
-        api_url: apiUrl,
-        api_key: apiKey,
+        target_models: targetModels,
       });
       setThreadId(res.data.thread_id);
       setStatus("running");
 
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: "ai", content: t({ zh: "我已启动评测流程，先为你解析需求。", en: "I've started the evaluation workflow. I'll analyze your query first." }), timestamp: Date.now() }]);
+      const modelCount = targetModels.length || 1;
+      const modelInfo = modelCount > 1
+        ? t({ zh: `我已启动评测流程，将并行评测 ${modelCount} 个模型。`, en: `I've started the evaluation workflow. Will evaluate ${modelCount} models in parallel.` })
+        : t({ zh: "我已启动评测流程，先为你解析需求。", en: "I've started the evaluation workflow. I'll analyze your query first." });
+      setMessages(prev => [...prev, { id: Date.now().toString(), role: "ai", content: modelInfo, timestamp: Date.now() }]);
 
     } catch (e) {
       console.error(e);

@@ -1061,12 +1061,22 @@ const SummaryBenchCard = ({ bench, lang }: { bench: any, lang: Lang }) => {
     const tt = (zh: string, en: string) => (lang === "zh" ? zh : en);
     const [isResultOpen, setIsResultOpen] = useState(true);
     // const [isSummaryOpen, setIsSummaryOpen] = useState(false);
-    
-    const hasResult = bench.meta?.eval_result && Object.keys(bench.meta.eval_result).length > 0;
+
+    // 支持多模型结果
+    const evalResults = bench.meta?.eval_results || {};  // 多模型: {model_name: {stats, detail_path}}
+    const singleResult = bench.meta?.eval_result;  // 单模型兼容
+    const hasMultipleResults = Object.keys(evalResults).length > 0;
+    const hasSingleResult = singleResult && Object.keys(singleResult).length > 0;
     // const hasSummary = !!bench.meta?.metric_summary;
 
+    // 获取所有模型的结果
+    const modelNames = hasMultipleResults ? Object.keys(evalResults) : (hasSingleResult ? ["Model"] : []);
+
     return (
-        <div className="min-w-[320px] bg-white rounded-xl p-3 border border-slate-200 shadow-sm flex flex-col gap-3 relative group hover:border-blue-400 hover:shadow-md transition-all self-start">
+        <div className={cn(
+          "bg-white rounded-xl p-3 border border-slate-200 shadow-sm flex flex-col gap-3 relative group hover:border-blue-400 hover:shadow-md transition-all self-start",
+          hasMultipleResults ? "min-w-[400px]" : "min-w-[320px]"
+        )}>
             <div className="flex justify-between items-start">
                 <span className="font-bold text-sm text-slate-800 line-clamp-1" title={bench.bench_name}>{bench.bench_name}</span>
                 <div className={cn(
@@ -1074,12 +1084,61 @@ const SummaryBenchCard = ({ bench, lang }: { bench: any, lang: Lang }) => {
                     bench.eval_status === "success" ? "bg-emerald-500" : "bg-slate-200"
                 )} />
             </div>
-            
+
             <div className="space-y-2">
-                {/* Metric Result Section */}
-                {hasResult ? (
+                {/* Multi-Model Results Section */}
+                {hasMultipleResults ? (
                     <div className="border border-slate-100 rounded-lg overflow-hidden bg-slate-50/30">
-                        <div 
+                        <div
+                            className="bg-slate-50 px-3 py-2 flex justify-between items-center cursor-pointer hover:bg-slate-100 transition-colors"
+                            onClick={() => setIsResultOpen(!isResultOpen)}
+                        >
+                            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+                                <Tag className="w-3 h-3" /> {tt("多模型对比", "Model Comparison")} ({modelNames.length})
+                            </span>
+                            {isResultOpen ? <ChevronUp className="w-3 h-3 text-slate-400"/> : <ChevronDown className="w-3 h-3 text-slate-400"/>}
+                        </div>
+                        {isResultOpen && (
+                             <div className="p-3 bg-white text-xs border-t border-slate-100 overflow-x-auto">
+                                 <table className="w-full border-collapse">
+                                     <thead>
+                                         <tr className="border-b border-slate-200">
+                                             <th className="text-left py-1 px-2 text-slate-500 font-medium">{tt("指标", "Metric")}</th>
+                                             {modelNames.map(name => (
+                                                 <th key={name} className="text-right py-1 px-2 text-slate-700 font-semibold truncate max-w-[120px]" title={name}>{name}</th>
+                                             ))}
+                                         </tr>
+                                     </thead>
+                                     <tbody>
+                                         {(() => {
+                                             // 收集所有指标
+                                             const allMetrics = new Set<string>();
+                                             Object.values(evalResults).forEach((r: any) => {
+                                                 if (r?.stats) Object.keys(r.stats).forEach(k => allMetrics.add(k));
+                                             });
+                                             return [...allMetrics].map(metric => (
+                                                 <tr key={metric} className="border-b border-slate-50 last:border-0">
+                                                     <td className="py-1 px-2 text-slate-500 truncate">{metric}</td>
+                                                     {modelNames.map(name => {
+                                                         const v = (evalResults[name] as any)?.stats?.[metric];
+                                                         return (
+                                                             <td key={name} className="text-right py-1 px-2 font-mono font-bold text-emerald-600">
+                                                                 {v !== undefined ? (typeof v === 'number' ? v.toFixed(4) : String(v)) : '-'}
+                                                             </td>
+                                                         );
+                                                     })}
+                                                 </tr>
+                                             ));
+                                         })()}
+                                     </tbody>
+                                 </table>
+                             </div>
+                        )}
+                    </div>
+                ) : hasSingleResult ? (
+                    /* Single Model Result Section */
+                    <div className="border border-slate-100 rounded-lg overflow-hidden bg-slate-50/30">
+                        <div
                             className="bg-slate-50 px-3 py-2 flex justify-between items-center cursor-pointer hover:bg-slate-100 transition-colors"
                             onClick={() => setIsResultOpen(!isResultOpen)}
                         >
@@ -1090,7 +1149,7 @@ const SummaryBenchCard = ({ bench, lang }: { bench: any, lang: Lang }) => {
                         </div>
                         {isResultOpen && (
                              <div className="p-3 bg-white text-xs space-y-1 border-t border-slate-100">
-                                 {Object.entries(bench.meta.eval_result).map(([k, v]) => (
+                                 {Object.entries(singleResult).map(([k, v]) => (
                                      <div key={k} className="flex justify-between items-center border-b border-slate-50 last:border-0 pb-1 last:pb-0">
                                          <span className="text-slate-500 font-medium truncate pr-2" title={k}>{k}</span>
                                          <span className="font-mono font-bold text-emerald-600">
@@ -1110,7 +1169,7 @@ const SummaryBenchCard = ({ bench, lang }: { bench: any, lang: Lang }) => {
                 {/* Metric Summary Section */}
                 {/* {hasSummary && (
                     <div className="border border-slate-100 rounded-lg overflow-hidden bg-slate-50/30">
-                        <div 
+                        <div
                             className="bg-slate-50 px-3 py-2 flex justify-between items-center cursor-pointer hover:bg-slate-100 transition-colors"
                             onClick={() => setIsSummaryOpen(!isSummaryOpen)}
                         >

@@ -27,59 +27,60 @@ class DataFlowEvalTool:
     封装 DataFlow 的评测 Pipeline
     - BenchAnswerGenerator
     - UnifiedBenchDatasetEvaluator
+    - 支持多模型并行评测
     """
-    
-    # Class-level cache to prevent reloading vLLM on every request
-    _cached_llm_serving: Optional[LLMServingABC] = None
-    _cached_model_config: Optional[ModelConfig] = None
+
+    # Class-level cache for multiple LLM servings (key = config hash)
+    _cached_llm_servings: Dict[str, LLMServingABC] = {}
+
+    @classmethod
+    def _make_config_key(cls, config: ModelConfig) -> str:
+        """生成模型配置的唯一缓存键"""
+        key_parts = [
+            config.model_name_or_path,
+            str(config.is_api),
+            config.api_url or "",
+            str(config.tensor_parallel_size),
+        ]
+        return "|".join(key_parts)
 
     def __init__(self, output_root: str = "cache/eval_results"):
         self.output_root = output_root
         os.makedirs(self.output_root, exist_ok=True)
-        # Initialize instance members from cache if available, otherwise None
-        self.llm_serving: Optional[LLMServingABC] = DataFlowEvalTool._cached_llm_serving
-        self._current_model_config: Optional[ModelConfig] = DataFlowEvalTool._cached_model_config
+        self.llm_serving: Optional[LLMServingABC] = None
+        self._current_model_config: Optional[ModelConfig] = None
 
     def _init_llm_serving(self, config: ModelConfig):
-        """初始化或更新 LLM Serving"""
-        def _is_broken_local(serving: Any) -> bool:
-            if serving is None:
-                return False
-            if isinstance(serving, LocalModelLLMServing_vllm):
-                if getattr(serving, "backend_initialized", False) and not hasattr(serving, "tokenizer"):
-                    return True
-            return False
+        """初始化或更新 LLM Serving（支持多模型缓存）"""
+        config_key = self._make_config_key(config)
 
-        # Check global cache first
-        if DataFlowEvalTool._cached_llm_serving and DataFlowEvalTool._cached_model_config == config:
-            if _is_broken_local(DataFlowEvalTool._cached_llm_serving):
-                log.warning("Detected broken cached local serving (missing tokenizer), rebuilding...")
-                try:
-                    if hasattr(DataFlowEvalTool._cached_llm_serving, "cleanup"):
-                        DataFlowEvalTool._cached_llm_serving.cleanup()
-                except Exception:
-                    pass
-                DataFlowEvalTool._cached_llm_serving = None
-                DataFlowEvalTool._cached_model_config = None
-            else:
-                self.llm_serving = DataFlowEvalTool._cached_llm_serving
-                self._current_model_config = config
-                return
+        # Check if we already have this model's serving cached
+        if config_key in DataFlowEvalTool._cached_llm_servings:
+            cached = DataFlowEvalTool._cached_llm_servings[config_key]
+            # 检查是否损坏（仅本地模型）
+            if isinstance(cached, LocalModelLLMServing_vllm):
+                if getattr(cached, "backend_initialized", False) and not hasattr(cached, "tokenizer"):
+                    log.warning(f"Detected broken cached serving for {config_key}, rebuilding...")
+                    try:
+                        if hasattr(cached, "cleanup"):
+                            cached.cleanup()
+                    except Exception:
+                        pass
+                    del DataFlowEvalTool._cached_llm_servings[config_key]
+                else:
+                    self.llm_serving = cached
+                    self._current_model_config = config
+                    log.info(f"Using cached serving for {config_key}")
+                    return
 
-        # If cache exists but config differs, cleanup old one
-        if DataFlowEvalTool._cached_llm_serving:
+        # 清理旧的实例（如果当前实例存在且配置不同）
+        if self.llm_serving and self._current_model_config and self._make_config_key(self._current_model_config) != config_key:
             try:
                 log.info("Cleaning up old LLM serving instance...")
-                if hasattr(DataFlowEvalTool._cached_llm_serving, "cleanup"):
-                    DataFlowEvalTool._cached_llm_serving.cleanup()
+                if hasattr(self.llm_serving, "cleanup"):
+                    self.llm_serving.cleanup()
             except Exception as e:
                 log.warning(f"Failed to cleanup old serving: {e}")
-            DataFlowEvalTool._cached_llm_serving = None
-            DataFlowEvalTool._cached_model_config = None
-
-        # 如果配置相同且 serving 已存在 (instance level check, just in case)
-        if self.llm_serving and self._current_model_config == config:
-            return
 
         model_name_or_path = config.model_name_or_path
         if isinstance(model_name_or_path, str) and model_name_or_path:
@@ -132,15 +133,16 @@ class DataFlowEvalTool:
                         self.llm_serving.backend_initialized = False
                 except Exception:
                     pass
-                DataFlowEvalTool._cached_llm_serving = None
-                DataFlowEvalTool._cached_model_config = None
+                # 清理缓存
+                if config_key in DataFlowEvalTool._cached_llm_servings:
+                    del DataFlowEvalTool._cached_llm_servings[config_key]
                 raise RuntimeError(f"Local vLLM serving init failed: {e}") from e
-        
+
         self._current_model_config = config
-        
-        # Update class-level cache
-        DataFlowEvalTool._cached_llm_serving = self.llm_serving
-        DataFlowEvalTool._cached_model_config = config
+
+        # Update class-level cache (multi-model)
+        DataFlowEvalTool._cached_llm_servings[config_key] = self.llm_serving
+        log.info(f"Cached serving for {config_key}")
 
     def _preprocess_dataframe(self, df, bench_name, key_mapping, cache_path="", eval_type=""):
         """Ad-hoc 数据预处理"""
@@ -226,7 +228,8 @@ class DataFlowEvalTool:
         Returns:
             {
                 "stats": dict,  # 评测统计结果
-                "detail_path": str  # step2 结果文件路径
+                "detail_path": str,  # step2 结果文件路径
+                "key_mapping": dict  # 最终使用的 key_mapping
             }
         """
         if not bench.dataset_cache or not os.path.exists(bench.dataset_cache):
@@ -238,16 +241,17 @@ class DataFlowEvalTool:
         # 1. 准备 Serving
         self._init_llm_serving(model_config)
 
-        # 2. 准备路径
+        # 2. 准备路径（包含模型名）
         timestamp = int(time.time())
         safe_name = bench.bench_name.replace("/", "__")
-        
+        model_safe_name = model_config.model_name_or_path.replace("/", "__").replace(":", "_")[:50]  # 截断防止过长
+
         # 中间结果目录
-        step_cache_dir = os.path.join(self.output_root, f"{safe_name}_{timestamp}_steps")
+        step_cache_dir = os.path.join(self.output_root, f"{safe_name}_{model_safe_name}_{timestamp}_steps")
         os.makedirs(step_cache_dir, exist_ok=True)
-        
+
         # 最终结果文件
-        eval_result_path = os.path.join(self.output_root, f"{safe_name}_{timestamp}_result.jsonl")
+        eval_result_path = os.path.join(self.output_root, f"{safe_name}_{model_safe_name}_{timestamp}_result.jsonl")
         nested_stage_path = os.path.join(step_cache_dir, "step_input_nested.jsonl")
 
         def _emit(stage: str, generated: int = 0, total: int = 0, percent: float = 0.0):

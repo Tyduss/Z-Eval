@@ -487,6 +487,8 @@ class StartWorkflowRequest(BaseModel):
     is_api: bool = False
     api_url: Optional[str] = None
     api_key: Optional[str] = None
+    # Multi-model support
+    target_models: Optional[List[Dict[str, Any]]] = None
 
 class ResumeWorkflowRequest(BaseModel):
     thread_id: str
@@ -541,15 +543,32 @@ async def start_workflow(req: StartWorkflowRequest):
     _set_thread_created_at(thread_id)
     log.info(f"Starting workflow for thread_id={thread_id}")
 
-    # Initialize State
-    initial_state = NodeState(
-        user_query=req.user_query,
-        target_model_name=req.target_model_name,
-        request=MainRequest(language=req.language),
-        use_rag=req.use_rag,
-        local_count=req.local_count,
-        hf_count=req.hf_count,
-        target_model=ModelConfig(
+    # Build ModelConfig list
+    target_models_list: List[ModelConfig] = []
+
+    if req.target_models:
+        # Multi-model mode
+        for m in req.target_models:
+            cfg = ModelConfig(
+                model_name_or_path=m.get("path", m.get("model_name_or_path", "")),
+                is_api=m.get("is_api", False),
+                api_url=m.get("api_url"),
+                api_key=m.get("api_key"),
+                tensor_parallel_size=m.get("tensor_parallel_size", req.tensor_parallel_size),
+                max_tokens=m.get("max_tokens", req.max_tokens),
+                temperature=m.get("temperature", req.temperature),
+                top_p=m.get("top_p", req.top_p),
+                top_k=m.get("top_k", req.top_k),
+                repetition_penalty=m.get("repetition_penalty", req.repetition_penalty),
+                max_model_len=m.get("max_model_len", req.max_model_len),
+                gpu_memory_utilization=m.get("gpu_memory_utilization", req.gpu_memory_utilization),
+            )
+            target_models_list.append(cfg)
+        log.info(f"Multi-model mode: {len(target_models_list)} models")
+
+    # Fallback to single model (backward compatible)
+    if not target_models_list and req.target_model_path:
+        single_model = ModelConfig(
             model_name_or_path=req.target_model_path,
             is_api=req.is_api,
             api_url=req.api_url,
@@ -563,11 +582,24 @@ async def start_workflow(req: StartWorkflowRequest):
             max_model_len=req.max_model_len,
             gpu_memory_utilization=req.gpu_memory_utilization,
         )
+        target_models_list.append(single_model)
+        log.info(f"Single-model mode (fallback)")
+
+    # Initialize State
+    initial_state = NodeState(
+        user_query=req.user_query,
+        target_model_name=req.target_model_name,
+        request=MainRequest(language=req.language),
+        use_rag=req.use_rag,
+        local_count=req.local_count,
+        hf_count=req.hf_count,
+        target_model=target_models_list[0] if target_models_list else None,
+        target_models=target_models_list,
     )
-    
+
     _launch_graph_task(thread_id, initial_state)
-    
-    return {"thread_id": thread_id, "status": "started"}
+
+    return {"thread_id": thread_id, "status": "started", "model_count": len(target_models_list)}
 
 async def run_graph_background(thread_id: str, input_state: Any, resume_command: Optional[Command] = None):
     # Ensure env is fresh (though we set it at top level, dynamic updates might need this)

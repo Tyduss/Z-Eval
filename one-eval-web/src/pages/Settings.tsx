@@ -83,6 +83,7 @@ export const Settings = () => {
   const { lang } = useLang();
   const tt = (zh: string, en: string) => (lang === "zh" ? zh : en);
   const [models, setModels] = useState<ModelConfig[]>([]);
+  const [selectedModelIdxs, setSelectedModelIdxs] = useState<Set<number>>(new Set());
   const [newModel, setNewModel] = useState<ModelConfig>({ name: "", path: "", is_api: false, api_url: "", api_key: "" });
   const [loading, setLoading] = useState(false);
   const [apiBaseUrl] = useState(() => localStorage.getItem("oneEval.apiBaseUrl") || "http://localhost:8000");
@@ -137,6 +138,14 @@ export const Settings = () => {
     try {
       const res = await axios.get(`${apiBaseUrl}/api/models`);
       setModels(res.data);
+      // 恢复选中的模型
+      try {
+        const saved = localStorage.getItem("oneEval.selectedModels");
+        if (saved) {
+          const idxs = JSON.parse(saved);
+          setSelectedModelIdxs(new Set(idxs));
+        }
+      } catch (e) {}
     } catch (e) {
       console.error("Failed to fetch models", e);
     }
@@ -638,7 +647,15 @@ export const Settings = () => {
 
             {/* List */}
             <div className="space-y-3">
-              <h4 className="text-sm font-medium text-slate-500 uppercase tracking-wider text-xs">{tt("已注册模型", "Registered Models")}</h4>
+              <div className="flex items-center justify-between">
+                <h4 className="text-sm font-medium text-slate-500 uppercase tracking-wider text-xs">{tt("已注册模型", "Registered Models")}</h4>
+                {models.length > 0 && (
+                  <div className="flex items-center gap-2 text-xs text-slate-500">
+                    <span>{tt("勾选参与评测", "Select for evaluation")}</span>
+                    <span className="text-emerald-600 font-medium">({selectedModelIdxs.size}/{models.length})</span>
+                  </div>
+                )}
+              </div>
               {models.length === 0 && (
                 <div className="text-center py-8 border-2 border-dashed border-slate-200 rounded-xl">
                   <p className="text-sm text-slate-400">{tt("暂未注册模型。", "No models registered yet.")}</p>
@@ -647,14 +664,33 @@ export const Settings = () => {
               <div className="grid grid-cols-1 gap-3">
                 {models.map((m, i) => (
                   <div key={i}>
-                    <div className="flex items-center justify-between p-4 rounded-xl border border-slate-100 bg-white hover:border-slate-200 hover:shadow-sm transition-all">
-                      <div className="flex-1 min-w-0 mr-4">
-                        <div className="flex items-center gap-2">
-                          <span className="font-semibold text-slate-900">{m.name}</span>
-                          {m.is_api && <span className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700">API</span>}
-                        </div>
-                        <div className="text-xs text-slate-500 truncate font-mono mt-1" title={m.is_api ? m.api_url : m.path}>
-                          {m.is_api ? `${m.api_url} → ${m.path}` : m.path}
+                    <div className={`flex items-center justify-between p-4 rounded-xl border transition-all ${selectedModelIdxs.has(i) ? "border-emerald-300 bg-emerald-50/30" : "border-slate-100 bg-white hover:border-slate-200"}`}>
+                      <div className="flex items-center gap-3 flex-1 min-w-0 mr-4">
+                        <input
+                          type="checkbox"
+                          title={tt("选择参与评测", "Select for evaluation")}
+                          checked={selectedModelIdxs.has(i)}
+                          onChange={(e) => {
+                            const newSet = new Set(selectedModelIdxs);
+                            if (e.target.checked) {
+                              newSet.add(i);
+                            } else {
+                              newSet.delete(i);
+                            }
+                            setSelectedModelIdxs(newSet);
+                            // 保存到 localStorage
+                            localStorage.setItem("oneEval.selectedModels", JSON.stringify([...newSet]));
+                          }}
+                          className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-slate-900">{m.name}</span>
+                            {m.is_api && <span className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700">API</span>}
+                          </div>
+                          <div className="text-xs text-slate-500 truncate font-mono mt-1" title={m.is_api ? m.api_url : m.path}>
+                            {m.is_api ? `${m.api_url} → ${m.path}` : m.path}
+                          </div>
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
@@ -664,7 +700,7 @@ export const Settings = () => {
                           onClick={() => handleTestModel(m)}
                           disabled={testingModelPath === getModelTestKey(m)}
                         >
-                          {testingModelPath === getModelTestKey(m) ? tt("测试中...", "Testing...") : tt("测试连接", "Test")}
+                          {testingModelPath === getModelTestKey(m) ? tt("测试中...", "Testing...") : tt("测试", "Test")}
                         </Button>
                         <Button
                           variant="ghost"
