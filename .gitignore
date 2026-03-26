@@ -214,3 +214,9 @@ cache_test/
 one_eval/server/_data/*
 .DS_Store
 .vscode/one_eval/server/uploads/
+TODO_脱敏方案.md
+
+# 本地数据文件（敏感信息不入库）
+one_eval/utils/bench_table/bench_gallery_local.json
+one_eval/utils/bench_table/bench_gallery.json.bak*
+one_eval/server/uploads/

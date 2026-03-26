@@ -248,9 +248,20 @@ from langgraph.types import Command
 from one_eval.utils.bench_registry import BenchRegistry
 from one_eval.core.metric_registry import get_registered_metrics_meta, MetricMeta
 
-# Bench Registry - 使用 bench_gallery.json 作为数据源
+# Bench Registry - 使用双文件模式（公共 + 本地映射）
 BENCH_GALLERY_PATH = REPO_ROOT / "one_eval" / "utils" / "bench_table" / "bench_gallery.json"
-bench_registry = BenchRegistry(str(BENCH_GALLERY_PATH))
+BENCH_GALLERY_PUBLIC_PATH = REPO_ROOT / "one_eval" / "utils" / "bench_table" / "bench_gallery_public.json"
+BENCH_GALLERY_LOCAL_PATH = REPO_ROOT / "one_eval" / "utils" / "bench_table" / "bench_gallery_local.json"
+
+# 优先使用双文件模式，如果公共文件不存在则回退到单一文件
+if BENCH_GALLERY_PUBLIC_PATH.exists():
+    bench_registry = BenchRegistry(
+        str(BENCH_GALLERY_PUBLIC_PATH),
+        local_mapping_path=str(BENCH_GALLERY_LOCAL_PATH) if BENCH_GALLERY_LOCAL_PATH.exists() else None
+    )
+else:
+    # 回退到旧的单一文件模式（向后兼容）
+    bench_registry = BenchRegistry(str(BENCH_GALLERY_PATH))
 
 # Models
 class HFConfigResponse(BaseModel):
@@ -791,23 +802,48 @@ async def get_status(thread_id: str):
                     # next=() 且没检测到中断——可能是竞态窗口：
                     # background task 仍在运行（ainvoke 尚未返回），或
                     # interrupt() 已触发但尚未持久化进 checkpoint
-                    benches = current_values.get("benches", [])
-                    has_phase2_data = bool(current_values.get("eval_results"))
                     task = RUNNING_WORKFLOW_TASKS.get(thread_id)
                     task_still_running = task is not None and not task.done()
 
-                    if (task_still_running or (benches and not has_phase2_data)) and attempt < max_retries - 1:
-                        delay = retry_delays[attempt]
-                        log.info(f"[get_status] Race condition detected (attempt {attempt+1}, task_running={task_still_running}), retrying in {delay}s...")
-                        await asyncio.sleep(delay)
-                        continue
-                    status = "completed"
+                    if task_still_running:
+                        # 后台任务仍在执行（如 DataFlowEvalNode 长时间运行），
+                        # checkpoint 不会更新直到节点完成，直接返回 running
+                        status = "running"
+                    else:
+                        # 任务已结束，做有限次重试以确认 interrupt 是否刚写入 checkpoint
+                        benches = current_values.get("benches", [])
+                        has_phase2_data = bool(current_values.get("eval_results"))
+
+                        # 检查是否是无参考答案的评测（仅生成模式）
+                        has_reference_answers = False
+                        for bench in benches:
+                            meta = bench.meta if hasattr(bench, 'meta') else {}
+                            eval_results = meta.get("eval_results", {}) if isinstance(meta, dict) else {}
+                            for model_name, result in eval_results.items():
+                                stats = result.get("stats", {})
+                                if stats:  # 如果有评估指标，说明有参考答案
+                                    has_reference_answers = True
+                                    break
+                            if has_reference_answers:
+                                break
+
+                        # 如果有 benches 但没有参考答案，这是正常的仅生成模式，不是竞态条件
+                        if benches and not has_phase2_data and not has_reference_answers and attempt < max_retries - 1:
+                            # 对于仅生成模式，直接返回 completed
+                            status = "completed"
+                        elif (benches and not has_phase2_data) and attempt < max_retries - 1:
+                            delay = retry_delays[attempt]
+                            log.info(f"[get_status] Race condition detected (attempt {attempt+1}), retrying in {delay}s...")
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            status = "completed"
             elif is_interrupted:
                 status = "interrupted"
             else:
                 status = "running"
 
-            log.info(f"[get_status] thread_id={thread_id}, status={status}, next={next_nodes}, interrupts={len(interrupts) if interrupts else 0}")
+            log.debug(f"[get_status] thread_id={thread_id}, status={status}, next={next_nodes}, interrupts={len(interrupts) if interrupts else 0}")
 
             return {
                 "thread_id": thread_id,
@@ -884,8 +920,26 @@ async def resume_workflow(thread_id: str, req: ResumeWorkflowRequest):
         async with get_checkpointer(DB_PATH, mode="run") as checkpointer:
             graph = build_complete_workflow(checkpointer=checkpointer)
             config = {"configurable": {"thread_id": req.thread_id}}
-            log.info(f"Applying state updates for {req.thread_id}: {req.state_updates.keys()}")
-            await graph.aupdate_state(config, req.state_updates)
+
+            # 检查工作流是否处于中断状态
+            try:
+                snap = await graph.aget_state(config)
+                is_interrupted = snap and (snap.interrupts or (snap.next and any(node in snap.next for node in ["HumanReviewNode", "PreEvalReviewNode", "MetricReviewNode"])))
+            except Exception:
+                is_interrupted = False
+
+            if is_interrupted:
+                log.warning(f"Workflow {req.thread_id} is interrupted, skipping state updates")
+            else:
+                log.info(f"Applying state updates for {req.thread_id}: {req.state_updates.keys()}")
+                try:
+                    await graph.aupdate_state(config, req.state_updates)
+                except Exception as e:
+                    log.error(f"Failed to update state for {req.thread_id}: {e}")
+                    # 如果是"Ambiguous update"错误，跳过更新
+                    if "Ambiguous update" in str(e):
+                        log.warning("Skipping state update due to ambiguous update error")
+                    # 对于其他错误，也跳过更新，继续执行
 
     async with get_checkpointer(DB_PATH, mode="run") as checkpointer:
         graph = build_complete_workflow(checkpointer=checkpointer)
@@ -1101,6 +1155,19 @@ async def manual_start(req: ManualStartRequest):
     async with get_checkpointer(DB_PATH, mode="run") as checkpointer:
         graph = build_complete_workflow(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
+
+        # 检查是否有旧的checkpoint状态
+        try:
+            snap = await graph.aget_state(config)
+            # 如果工作流已经结束（next=()）或处于中断状态，删除旧的checkpoint
+            if snap and (not snap.next or snap.interrupts):
+                log.info(f"Clearing old workflow checkpoint for {thread_id} (next={snap.next}, interrupts={snap.interrupts})")
+                await checkpointer.delete(config)
+        except Exception:
+            # 如果没有checkpoint，继续
+            pass
+
+        # 设置初始状态
         await graph.aupdate_state(
             config,
             {
@@ -1113,7 +1180,9 @@ async def manual_start(req: ManualStartRequest):
             },
         )
 
-    _launch_graph_task(thread_id, None, resume_command=Command(goto="DataFlowEvalNode"))
+    # 对于手动启动，从DatasetStructureNode开始，跳过意图理解和基准搜索
+    log.info(f"Manual start for {thread_id}, using goto=DatasetStructureNode")
+    _launch_graph_task(thread_id, None, resume_command=Command(goto="DatasetStructureNode"))
     return {"thread_id": thread_id, "status": "started", "model_count": len(target_models_list)}
 
 def _bench_download_sync(bench: Dict[str, Any], *, repo_root: Path, overrides: Dict[str, Any], max_retries: int = 3) -> Dict[str, Any]:
@@ -1133,10 +1202,17 @@ def _bench_download_sync(bench: Dict[str, Any], *, repo_root: Path, overrides: D
             return fuzzy[0]
         return splits[0]
 
-    meta = bench.get("meta") or {}
+    # Handle both dictionary and BenchInfo objects
+    if hasattr(bench, '__dict__'):
+        # Convert BenchInfo to dictionary
+        bench_dict = bench.__dict__.copy()
+    else:
+        bench_dict = bench.copy() if isinstance(bench, dict) else {}
+
+    meta = bench_dict.get("meta") or {}
     if not isinstance(meta, dict):
         meta = {}
-    bench["meta"] = meta
+    bench_dict["meta"] = meta
 
     if overrides.get("repo_id"):
         hf_meta = meta.get("hf_meta") or {}
@@ -1159,7 +1235,7 @@ def _bench_download_sync(bench: Dict[str, Any], *, repo_root: Path, overrides: D
     if isinstance(meta.get("hf_meta"), dict):
         hf_repo = meta["hf_meta"].get("hf_repo")
     if not hf_repo:
-        hf_repo = bench.get("bench_name") or bench.get("name") or ""
+        hf_repo = bench_dict.get("bench_name") or bench_dict.get("name") or ""
 
     if not dl_config:
         dl_config = {"config": "default", "split": "test"}
@@ -1208,10 +1284,10 @@ def _bench_download_sync(bench: Dict[str, Any], *, repo_root: Path, overrides: D
         candidates = [p for p in candidates if p.exists() and p.stat().st_size > 0]
         if candidates:
             chosen = max(candidates, key=lambda p: p.stat().st_mtime)
-            bench["dataset_cache"] = str(chosen)
-            bench["download_status"] = "success"
+            bench_dict["dataset_cache"] = str(chosen)
+            bench_dict["download_status"] = "success"
             meta.pop("download_error", None)
-            return bench
+            return bench_dict
 
     if overrides.get("force") and output_path.exists():
         try:
@@ -1220,10 +1296,10 @@ def _bench_download_sync(bench: Dict[str, Any], *, repo_root: Path, overrides: D
             pass
 
     if output_path.exists() and output_path.stat().st_size > 0:
-        bench["dataset_cache"] = str(output_path)
-        bench["download_status"] = "success"
+        bench_dict["dataset_cache"] = str(output_path)
+        bench_dict["download_status"] = "success"
         meta.pop("download_error", None)
-        return bench
+        return bench_dict
 
     tool = HFDownloadTool(cache_dir=str(cache_root))
     last_err = ""
@@ -1241,13 +1317,13 @@ def _bench_download_sync(bench: Dict[str, Any], *, repo_root: Path, overrides: D
         last_err = res.get("error") or ""
 
     if ok and output_path.exists() and output_path.stat().st_size > 0:
-        bench["dataset_cache"] = str(output_path)
-        bench["download_status"] = "success"
+        bench_dict["dataset_cache"] = str(output_path)
+        bench_dict["download_status"] = "success"
         meta.pop("download_error", None)
     else:
-        bench["download_status"] = "failed"
+        bench_dict["download_status"] = "failed"
         meta["download_error"] = last_err or "download failed"
-    return bench
+    return bench_dict
 
 def _bench_from_dict(b: Any) -> BenchInfo:
     """从前端传来的 dict 安全构建 BenchInfo，过滤掉 BenchInfo 不认识的字段"""
@@ -1274,6 +1350,7 @@ _VALID_EVAL_TYPES = {
     "key3_q_choices_a",
     "key3_q_choices_as",
     "key3_q_a_rejected",
+    "other",  # 自定义/其他类型
 }
 _RUNTIME_META_KEYS = {
     "eval_result",
@@ -1655,7 +1732,15 @@ def get_bench_gallery():
 @app.delete("/api/benches/gallery/{bench_name}")
 def delete_bench_from_gallery(bench_name: str):
     """从 gallery 中删除 benchmark"""
-    success = bench_registry.delete_bench(bench_name, str(BENCH_GALLERY_PATH))
+    # 判断是否使用双文件模式
+    if BENCH_GALLERY_PUBLIC_PATH.exists():
+        success = bench_registry.delete_bench(
+            bench_name,
+            str(BENCH_GALLERY_PUBLIC_PATH),
+            local_mapping_path=str(BENCH_GALLERY_LOCAL_PATH) if BENCH_GALLERY_LOCAL_PATH.exists() else None
+        )
+    else:
+        success = bench_registry.delete_bench(bench_name, str(BENCH_GALLERY_PATH))
     if success:
         return {"status": "success", "message": f"Bench '{bench_name}' deleted"}
     else:
@@ -1735,7 +1820,12 @@ async def append_attachment_to_bench(
 
 @app.get("/api/benches/preview/{bench_name}")
 async def preview_bench_file(bench_name: str, limit: int = 10):
-    """预览 benchmark 的数据文件内容"""
+    """预览 benchmark 的数据文件内容
+
+    Args:
+        bench_name: benchmark 名称
+        limit: 返回的行数限制，0 或负数表示返回全部数据
+    """
     bench = bench_registry.get_bench_by_name(bench_name)
     if not bench:
         raise HTTPException(status_code=404, detail=f"Bench '{bench_name}' not found")
@@ -1748,13 +1838,16 @@ async def preview_bench_file(bench_name: str, limit: int = 10):
     file_path = Path(dataset_cache)
     file_ext = file_path.suffix.lower()
 
+    # limit <= 0 表示返回全部数据
+    return_all = limit <= 0
+
     try:
         if file_ext == ".jsonl":
             # 读取 JSONL 文件
             rows = []
             with open(file_path, "r", encoding="utf-8") as f:
                 for i, line in enumerate(f):
-                    if i >= limit:
+                    if not return_all and i >= limit:
                         break
                     line = line.strip()
                     if line:
@@ -1775,7 +1868,7 @@ async def preview_bench_file(bench_name: str, limit: int = 10):
             with open(file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list):
-                rows = data[:limit]
+                rows = data if return_all else data[:limit]
                 all_keys = set()
                 for row in rows:
                     if isinstance(row, dict):
@@ -1791,7 +1884,7 @@ async def preview_bench_file(bench_name: str, limit: int = 10):
         elif file_ext == ".csv":
             # 读取 CSV 文件
             import pandas as pd
-            df = pd.read_csv(file_path, nrows=limit)
+            df = pd.read_csv(file_path, nrows=None if return_all else limit)
             return {
                 "format": "csv",
                 "columns": list(df.columns),
@@ -2005,7 +2098,7 @@ async def upload_bench_dataset(
     eval_type: str = Form(...),
     description: str = Form(default=""),
 ):
-    """上传本地数据集文件并添加到 gallery"""
+    """上传本地数据集文件并添加到 gallery（使用双文件脱敏模式）"""
     import shutil
     import aiofiles
 
@@ -2056,35 +2149,94 @@ async def upload_bench_dataset(
         except Exception:
             pass
 
-    # 构建完整的 bench 数据结构
-    bench_data = {
-        "bench_name": safe_bench_name,
-        "bench_table_exist": True,  # 本地上传的数据集已存在
-        "bench_source_url": f"local://uploads/{saved_filename}",
-        "bench_dataflow_eval_type": eval_type,
-        "bench_prompt_template": None,
-        "bench_keys": list(default_key_mapping.keys()),
-        "dataset_cache": str(saved_path),  # 直接指向本地文件
-        "meta": {
+    # 当 eval_type 为 "other" 时，根据实际字段自动推断
+    if eval_type.strip().lower() == "other":
+        has_answer = "input_target_key" in default_key_mapping
+        eval_type = "key2_qa" if has_answer else "key1_text_score"
+
+    # 判断是否使用双文件模式
+    use_dual_file_mode = BENCH_GALLERY_PUBLIC_PATH.exists()
+
+    if use_dual_file_mode:
+        # 双文件模式：分离公共数据和本地映射
+        # 公共数据（脱敏）
+        public_bench_data = {
             "bench_name": safe_bench_name,
-            "source": "local_upload",
-            "aliases": [safe_bench_name, bench_name],
-            "category": "Knowledge & QA",
-            "tags": [eval_type, "uploaded", "本地上传评测集"],
-            "description": description or f"Uploaded from {file.filename}",
-            "created_at": datetime.now(timezone.utc).isoformat(),  # 添加创建时间
-            "key_mapping": default_key_mapping,
-            "hf_meta": {
+            "bench_table_exist": True,
+            "bench_source_url": f"local://uploaded/{safe_bench_name}",  # 脱敏后的标识符
+            "bench_dataflow_eval_type": eval_type,
+            "bench_prompt_template": None,
+            "bench_keys": list(default_key_mapping.keys()),
+            "meta": {
                 "bench_name": safe_bench_name,
-                "hf_repo": "",
-                "card_text": "",
-                "tags": [eval_type, "uploaded"],
-                "exists_on_hf": False
+                "source": "local_upload",
+                "is_local_upload": True,  # 标识为本地文件
+                "aliases": [safe_bench_name, bench_name],
+                "category": "Knowledge & QA",
+                "tags": [eval_type, "uploaded", "本地上传评测集"],
+                "description": description or f"Uploaded from {file.filename}",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "key_mapping": default_key_mapping,
+                "hf_meta": {
+                    "bench_name": safe_bench_name,
+                    "hf_repo": "",
+                    "card_text": "",
+                    "tags": [eval_type, "uploaded"],
+                    "exists_on_hf": False
+                }
             }
         }
-    }
 
-    success = bench_registry.add_bench(bench_data, str(BENCH_GALLERY_PATH))
+        # 本地映射（包含敏感路径）
+        local_mapping = {
+            "actual_source_url": f"local://uploads/{saved_filename}",
+            "dataset_cache": str(saved_path),
+            "uploaded_filename": saved_filename,
+            "original_filename": file.filename,
+            "upload_time": datetime.now(timezone.utc).isoformat()
+        }
+
+        success = bench_registry.add_local_upload_bench(
+            public_bench_data,
+            str(BENCH_GALLERY_PUBLIC_PATH),
+            str(BENCH_GALLERY_LOCAL_PATH),
+            local_mapping
+        )
+
+        # 返回时使用完整数据（包含本地路径）
+        bench_data = dict(public_bench_data)
+        bench_data["bench_source_url"] = local_mapping["actual_source_url"]
+        bench_data["dataset_cache"] = local_mapping["dataset_cache"]
+    else:
+        # 旧模式：单一文件（向后兼容）
+        bench_data = {
+            "bench_name": safe_bench_name,
+            "bench_table_exist": True,
+            "bench_source_url": f"local://uploads/{saved_filename}",
+            "bench_dataflow_eval_type": eval_type,
+            "bench_prompt_template": None,
+            "bench_keys": list(default_key_mapping.keys()),
+            "dataset_cache": str(saved_path),
+            "meta": {
+                "bench_name": safe_bench_name,
+                "source": "local_upload",
+                "aliases": [safe_bench_name, bench_name],
+                "category": "Knowledge & QA",
+                "tags": [eval_type, "uploaded", "本地上传评测集"],
+                "description": description or f"Uploaded from {file.filename}",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "key_mapping": default_key_mapping,
+                "hf_meta": {
+                    "bench_name": safe_bench_name,
+                    "hf_repo": "",
+                    "card_text": "",
+                    "tags": [eval_type, "uploaded"],
+                    "exists_on_hf": False
+                }
+            }
+        }
+        success = bench_registry.add_bench(bench_data, str(BENCH_GALLERY_PATH))
+
     if success:
         return {
             "status": "success",
@@ -2116,6 +2268,209 @@ def _count_file_rows(file_path: Path, ext: str) -> int:
     except Exception:
         pass
     return -1
+
+
+# --- Eval result download endpoints ---
+# NOTE: /csv/ and /xlsx/ routes MUST be declared before the generic /{thread_id}/... route,
+#       otherwise FastAPI matches "csv"/"xlsx" as thread_id.
+
+def _find_result_file(bench_name: str, model_name: str, thread_id: str | None = None):
+    """查找评测结果文件，返回路径或 None"""
+    import glob
+    search_patterns = [
+        f"{REPO_ROOT}/cache/eval_results/{bench_name}_{model_name}_*/step_step1.jsonl",
+        f"{REPO_ROOT}/cache/eval_results/{bench_name}_{model_name}_*/*.jsonl",
+        f"{REPO_ROOT}/cache/eval_results/{bench_name}_{model_name}_*/*.json",
+    ]
+    if thread_id:
+        search_patterns.extend([
+            f"{REPO_ROOT}/results/{thread_id}/{bench_name}/{model_name}/*.json",
+            f"{REPO_ROOT}/results/{thread_id}/{bench_name}/{model_name}/*.jsonl",
+        ])
+    for pattern in search_patterns:
+        files = glob.glob(pattern)
+        if files:
+            return files[0]
+    return None
+
+
+def _read_result_df(filepath: str) -> "pd.DataFrame":
+    """读取结果文件为 DataFrame"""
+    import pandas as pd
+    if filepath.endswith(".jsonl"):
+        return pd.read_json(filepath, lines=True)
+    elif filepath.endswith(".json"):
+        return pd.read_json(filepath)
+    else:
+        raise ValueError("Unsupported file format")
+
+
+def _transform_df_for_export(df: "pd.DataFrame") -> "pd.DataFrame":
+    """转码 DataFrame：拆分 generated_ans 为 thinking 和 answer 列"""
+    import re
+    import pandas as pd
+
+    df = df.copy()
+    if "generated_ans" in df.columns:
+        thinking_list = []
+        answer_list = []
+        for val in df["generated_ans"]:
+            text = str(val) if val else ""
+            think_m = re.search(r"<think[^>]*>([\s\S]*?)</think\s*>\s*", text, re.IGNORECASE)
+            ans_m = re.search(r"<answer[^>]*>([\s\S]*?)</answer\s*>", text, re.IGNORECASE)
+            thinking_list.append(think_m.group(1).strip() if think_m else "")
+            answer_list.append(ans_m.group(1).strip() if ans_m else text)
+        df["thinking"] = thinking_list
+        df["answer"] = answer_list
+        # 把 generated_ans 移到最后一列
+        cols = [c for c in df.columns if c != "generated_ans"] + ["generated_ans"]
+        df = df[cols]
+    return df
+
+
+@app.get("/api/eval/result/csv/{thread_id}/{bench_name}/{model_name}")
+async def download_eval_csv(thread_id: str, bench_name: str, model_name: str):
+    """下载评测结果为 CSV 格式（转码：拆分 generated_ans 为 thinking + answer）"""
+    from fastapi.responses import StreamingResponse
+    import pandas as pd
+    import io
+
+    filepath = _find_result_file(bench_name, model_name, thread_id)
+    if not filepath or not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail=f"Result file not found for {bench_name}/{model_name}.")
+
+    try:
+        df = _transform_df_for_export(_read_result_df(filepath))
+        buf = io.StringIO()
+        df.to_csv(buf, index=False, encoding="utf-8-sig")
+        buf.seek(0)
+        from urllib.parse import quote
+        safe_name = f"{bench_name}_{model_name}_results.csv"
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(safe_name)}"},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error converting to CSV: {str(e)}")
+
+
+@app.get("/api/eval/result/xlsx/{thread_id}/{bench_name}/{model_name}")
+async def download_eval_xlsx(thread_id: str, bench_name: str, model_name: str):
+    """下载评测结果为 XLSX 格式（转码：拆分 generated_ans 为 thinking + answer）"""
+    from fastapi.responses import Response
+    import pandas as pd
+    import io
+
+    filepath = _find_result_file(bench_name, model_name, thread_id)
+    if not filepath or not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail=f"Result file not found for {bench_name}/{model_name}.")
+
+    try:
+        df = _transform_df_for_export(_read_result_df(filepath))
+        buf = io.BytesIO()
+        df.to_excel(buf, index=False, engine="openpyxl")
+        buf.seek(0)
+        from urllib.parse import quote
+        safe_name = f"{bench_name}_{model_name}_results.xlsx"
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(safe_name)}"},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error converting to XLSX: {str(e)}")
+
+
+@app.get("/api/eval/result/{thread_id}/{bench_name}/{model_name}")
+async def download_eval_result(thread_id: str, bench_name: str, model_name: str):
+    """下载评测结果文件 - 简化版本，直接从已知路径查找"""
+    from fastapi.responses import FileResponse
+    import glob
+
+    # 根据日志中的路径模式查找结果文件
+    # 路径模式：/Users/t/One-Eval/cache/eval_results/{bench_name}_{model_name}_*/step_step1.jsonl
+
+    # 查找可能的文件路径（从项目根目录开始）
+    search_patterns = [
+        f"{REPO_ROOT}/cache/eval_results/{bench_name}_{model_name}_*/step_step1.jsonl",
+        f"{REPO_ROOT}/cache/eval_results/{bench_name}_{model_name}_*/*.jsonl",
+        f"{REPO_ROOT}/cache/eval_results/{bench_name}_{model_name}_*/*.json",
+        # 备用路径
+        f"{REPO_ROOT}/results/{thread_id}/{bench_name}/{model_name}/*.json",
+        f"{REPO_ROOT}/results/{thread_id}/{bench_name}/{model_name}/*.jsonl",
+    ]
+
+    for pattern in search_patterns:
+        files = glob.glob(pattern)
+        if files:
+            result_file = files[0]
+            # 生成友好的文件名
+            filename = f"{bench_name}_{model_name}_results.json"
+            if result_file.endswith('.jsonl'):
+                filename = filename.replace('.json', '.jsonl')
+
+            return FileResponse(
+                path=result_file,
+                filename=filename,
+                media_type="application/json",
+            )
+
+    # 如果没找到，返回简单错误
+    raise HTTPException(
+        status_code=404,
+        detail=f"Result file not found for {bench_name}/{model_name}. Check cache/eval_results/ directory."
+    )
+
+
+@app.get("/api/eval/preview/{thread_id}/{bench_name}/{model_name}")
+async def preview_eval_result(thread_id: str, bench_name: str, model_name: str, limit: int = 20):
+    """预览评测结果（返回前 N 条记录） - 简化版本"""
+    import glob
+    import pandas as pd
+
+    # 使用与下载API相同的路径查找逻辑
+    search_patterns = [
+        f"{REPO_ROOT}/cache/eval_results/{bench_name}_{model_name}_*/step_step1.jsonl",
+        f"{REPO_ROOT}/cache/eval_results/{bench_name}_{model_name}_*/*.jsonl",
+        f"{REPO_ROOT}/cache/eval_results/{bench_name}_{model_name}_*/*.json",
+        f"{REPO_ROOT}/results/{thread_id}/{bench_name}/{model_name}/*.json",
+        f"{REPO_ROOT}/results/{thread_id}/{bench_name}/{model_name}/*.jsonl",
+    ]
+
+    detail_path = None
+    for pattern in search_patterns:
+        files = glob.glob(pattern)
+        if files:
+            detail_path = files[0]
+            break
+
+    if not detail_path or not os.path.exists(detail_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Result file not found for {bench_name}/{model_name}. Check cache/eval_results/ directory."
+        )
+
+    # 读取文件
+    try:
+        if detail_path.endswith(".jsonl"):
+            df = pd.read_json(detail_path, lines=True)
+        elif detail_path.endswith(".json"):
+            df = pd.read_json(detail_path)
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported file format")
+
+        total = len(df)
+        preview_df = df.head(limit)
+        return {
+            "total": total,
+            "limit": limit,
+            "file_path": detail_path,
+            "columns": list(preview_df.columns),
+            "rows": preview_df.to_dict(orient="records"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading result file: {str(e)}")
 
 
 if __name__ == "__main__":

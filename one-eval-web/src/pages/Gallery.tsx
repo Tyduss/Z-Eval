@@ -22,6 +22,7 @@ import {
   Trash2,
   Upload,
   Eye,
+  EyeOff,
   Table,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -253,6 +254,23 @@ const BENCH_TYPES = [
   "other",
 ];
 
+// 有效的评测数据流类型（对应后端 _VALID_EVAL_TYPES）
+const EVAL_TYPES = [
+  { value: "key1_text_score", label: { zh: "文本评分 (Text Score)", en: "Text Score" } },
+  { value: "key2_qa", label: { zh: "问答 (QA)", en: "QA" } },
+  { value: "key2_q_ma", label: { zh: "多答案问答 (Multi-Answer QA)", en: "Multi-Answer QA" } },
+  { value: "key3_q_choices_a", label: { zh: "单选题 (Single Choice)", en: "Single Choice" } },
+  { value: "key3_q_choices_as", label: { zh: "多选题 (Multiple Choice)", en: "Multiple Choice" } },
+  { value: "key3_q_a_rejected", label: { zh: "拒绝评测 (Rejected)", en: "Rejected" } },
+  { value: "other", label: { zh: "其他/自定义 (Other)", en: "Other" } },
+];
+
+function evalTypeLabel(value: string, lang: string) {
+  const item = EVAL_TYPES.find(t => t.value === value);
+  if (!item) return value;
+  return lang === "zh" ? item.label.zh : item.label.en;
+}
+
 export const Gallery = () => {
   const { lang } = useLang();
   const tt = (zh: string, en: string) => (lang === "zh" ? zh : en);
@@ -299,7 +317,7 @@ export const Gallery = () => {
   const [activeBenchId, setActiveBenchId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [sortBy, setSortBy] = useState<SortOption>("newest");
+  const [sortBy, setSortBy] = useState<SortOption>("attachment_first");  // 默认有附件优先
   const [showOnlyUploaded, setShowOnlyUploaded] = useState(false);  // 只显示本地上传的
 
   // Add Bench Modal 状态
@@ -310,6 +328,7 @@ export const Gallery = () => {
     type: "knowledge",
     description: "",
     dataset_url: "",
+    eval_type: "key2_qa",  // 评测数据流类型
   });
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadMode, setUploadMode] = useState<"url" | "file">("url");
@@ -339,6 +358,8 @@ export const Gallery = () => {
 
   // 数据预览弹窗状态
   const [isPreviewModalOpen, setIsPreviewModalOpen] = useState(false);
+  const [showAllData, setShowAllData] = useState(false);  // 是否显示全部数据
+  const [totalRows, setTotalRows] = useState<number | null>(null);  // 总行数
 
   // 侧边栏宽度状态
   const [sidebarWidth, setSidebarWidth] = useState(420);
@@ -510,31 +531,50 @@ export const Gallery = () => {
     }
   };
 
-  const handlePreviewBench = async (benchId: string) => {
+  const handlePreviewBench = async (benchId: string, loadAll: boolean = false) => {
     setIsPreviewModalOpen(true);
     setIsPreviewLoading(true);
-    setPreviewData(null);
-    setFieldAnalysis(null);
+    if (!loadAll) {
+      setPreviewData(null);
+      setFieldAnalysis(null);
+    }
+    setShowAllData(loadAll);
     try {
       const apiBaseUrl = getApiBaseUrl();
-      // 并行获取预览和字段分析
-      const [previewRes, analysisRes] = await Promise.all([
-        fetch(`${apiBaseUrl}/api/benches/preview/${encodeURIComponent(benchId)}?limit=50`),
-        fetch(`${apiBaseUrl}/api/benches/analyze_fields/${encodeURIComponent(benchId)}`),
-      ]);
 
-      if (previewRes.ok) {
-        const data = await previewRes.json();
-        setPreviewData({
-          columns: data.columns || [],
-          rows: data.rows || [],
-          format: data.format || "unknown",
-        });
-      }
+      if (loadAll) {
+        // 加载全部数据 (limit=0 表示不限制)
+        const previewRes = await fetch(`${apiBaseUrl}/api/benches/preview/${encodeURIComponent(benchId)}?limit=0`);
+        if (previewRes.ok) {
+          const data = await previewRes.json();
+          setPreviewData({
+            columns: data.columns || [],
+            rows: data.rows || [],
+            format: data.format || "unknown",
+          });
+          setTotalRows(data.rows?.length || 0);
+        }
+      } else {
+        // 并行获取预览（默认 10 条）和字段分析
+        const [previewRes, analysisRes] = await Promise.all([
+          fetch(`${apiBaseUrl}/api/benches/preview/${encodeURIComponent(benchId)}`),
+          fetch(`${apiBaseUrl}/api/benches/analyze_fields/${encodeURIComponent(benchId)}`),
+        ]);
 
-      if (analysisRes.ok) {
-        const analysis = await analysisRes.json();
-        setFieldAnalysis(analysis);
+        if (previewRes.ok) {
+          const data = await previewRes.json();
+          setPreviewData({
+            columns: data.columns || [],
+            rows: data.rows || [],
+            format: data.format || "unknown",
+          });
+          setTotalRows(data.total_shown || data.rows?.length || 0);
+        }
+
+        if (analysisRes.ok) {
+          const analysis = await analysisRes.json();
+          setFieldAnalysis(analysis);
+        }
       }
     } catch (err) {
       console.error("Failed to preview bench:", err);
@@ -595,7 +635,7 @@ export const Gallery = () => {
         const formData = new FormData();
         formData.append("file", uploadFile);
         formData.append("bench_name", addForm.bench_name.trim());
-        formData.append("eval_type", addForm.type);
+        formData.append("eval_type", addForm.eval_type || "key2_qa");  // 使用 eval_type 字段
         formData.append("description", addForm.description.trim());
 
         const response = await fetch(`${apiBaseUrl}/api/benches/upload`, {
@@ -610,7 +650,7 @@ export const Gallery = () => {
 
         await fetchBenches();
         setIsAddModalOpen(false);
-        setAddForm({ bench_name: "", type: "knowledge", description: "", dataset_url: "" });
+        setAddForm({ bench_name: "", type: "knowledge", description: "", dataset_url: "", eval_type: "key2_qa" });
         setUploadFile(null);
         setUploadMode("url");
       } else {
@@ -634,7 +674,7 @@ export const Gallery = () => {
         // 成功后刷新列表并关闭弹窗
         await fetchBenches();
         setIsAddModalOpen(false);
-        setAddForm({ bench_name: "", type: "knowledge", description: "", dataset_url: "" });
+        setAddForm({ bench_name: "", type: "knowledge", description: "", dataset_url: "", eval_type: "key2_qa" });
       }
     } catch (err) {
       alert(err instanceof Error ? err.message : tt("新增 Bench 失败", "Failed to add bench"));
@@ -1185,8 +1225,38 @@ export const Gallery = () => {
                           </table>
                         </div>
                       </div>
-                      <div className="text-xs text-slate-500 text-right">
-                        {tt("显示前 ", "Showing first ")}{previewData.rows.length}{tt(" 条数据", " rows")}
+                      <div className="flex items-center justify-between">
+                        <div className="text-xs text-slate-500">
+                          {showAllData
+                            ? tt(`共 ${previewData.rows.length} 条数据`, `${previewData.rows.length} rows total`)
+                            : tt(`显示前 ${previewData.rows.length} 条数据`, `Showing first ${previewData.rows.length} rows`)}
+                        </div>
+                        <div className="flex gap-2">
+                          {!showAllData && previewData.rows.length === 10 && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handlePreviewBench(activeBench.id, true)}
+                              disabled={isPreviewLoading}
+                            >
+                              {isPreviewLoading ? (
+                                <><Loader2 className="w-3 h-3 mr-1 animate-spin" />{tt("加载中...", "Loading...")}</>
+                              ) : (
+                                <><Eye className="w-3 h-3 mr-1" />{tt("显示全部", "Show All")}</>
+                              )}
+                            </Button>
+                          )}
+                          {showAllData && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handlePreviewBench(activeBench.id, false)}
+                              disabled={isPreviewLoading}
+                            >
+                              <><EyeOff className="w-3 h-3 mr-1" />{tt("收起", "Collapse")}</>
+                            </Button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1199,7 +1269,10 @@ export const Gallery = () => {
 
               {/* 弹窗底部 */}
               <div className="flex justify-end gap-2 p-4 border-t border-slate-200">
-                <Button variant="outline" onClick={() => setIsPreviewModalOpen(false)}>
+                <Button variant="outline" onClick={() => {
+                  setIsPreviewModalOpen(false);
+                  setShowAllData(false);
+                }}>
                   {tt("关闭", "Close")}
                 </Button>
               </div>
@@ -1286,6 +1359,23 @@ export const Gallery = () => {
                     ))}
                   </select>
                 </div>
+
+                {/* 文件上传模式下显示评测类型选择器 */}
+                {uploadMode === "file" && (
+                  <div className="space-y-2">
+                    <Label>{tt("评测类型 *", "Eval Type *")}</Label>
+                    <select
+                      value={addForm.eval_type}
+                      onChange={(e) => setAddForm({ ...addForm, eval_type: e.target.value })}
+                      className="w-full h-10 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
+                    >
+                      {EVAL_TYPES.map((t) => (
+                        <option key={t.value} value={t.value}>{evalTypeLabel(t.value, lang)}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-slate-500">{tt("选择数据集的评测格式类型", "Select the evaluation format type of your dataset")}</p>
+                  </div>
+                )}
 
                 <div className="space-y-2">
                   <Label>{tt("描述 *", "Description *")}</Label>
@@ -1405,7 +1495,7 @@ export const Gallery = () => {
                 <Button variant="outline" className="border-slate-200" onClick={() => {
                   setIsAddModalOpen(false);
                   setUploadFile(null);
-                  setAddForm({ bench_name: "", type: "knowledge", description: "", dataset_url: "" });
+                  setAddForm({ bench_name: "", type: "knowledge", description: "", dataset_url: "", eval_type: "key2_qa" });
                   setUploadMode("url");
                 }}>
                   {tt("取消", "Cancel")}

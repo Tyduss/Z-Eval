@@ -144,20 +144,10 @@ class DataFlowEvalNode(BaseNode):
                 },
             )
         if str(bench.bench_dataflow_eval_type).strip() not in VALID_EVAL_TYPES:
-            self.logger.warning(f"[{bench.bench_name}] 非法 eval_type={bench.bench_dataflow_eval_type}")
+            self.logger.warning(f"[{bench.bench_name}] 跳过不支持的 eval_type={bench.bench_dataflow_eval_type}")
             bench.eval_status = "failed"
-            approved = list(getattr(state, "approved_warning_ids", []) or [])
-            confirm_id = "PreEvalReviewNode_confirm"
-            approved = [x for x in approved if x != confirm_id]
-            return Command(
-                goto="PreEvalReviewNode",
-                update={
-                    "approved_warning_ids": approved,
-                    "waiting_for_human": True,
-                    "error_flag": True,
-                    "error_msg": f"[{bench.bench_name}] eval_type 无效（{bench.bench_dataflow_eval_type}），请在基准配置中重新选择后再评测。",
-                },
-            )
+            state.eval_cursor = cursor + 1
+            return state
 
         # === 执行评测 ===
         if not bench.meta:
@@ -268,9 +258,14 @@ class DataFlowEvalNode(BaseNode):
             model_name = model_config.model_name_or_path
 
             def _on_progress(p: dict):
-                # 多模型时只更新第一个模型的进度（简化处理）
-                if model_config == model_configs[0] and thread_id:
-                    set_progress(thread_id, p)
+                # 每个模型独立更新进度，用 {thread_id}:{model_name} 做 key
+                if thread_id:
+                    p_with_model = {**p, "model_name": model_name}
+                    set_progress(f"{thread_id}:{model_name}", p_with_model)
+                # 同时更新 bench.meta 供前端 state 同步
+                if not bench.meta:
+                    bench.meta = {}
+                bench.meta["eval_progress"] = p
 
             try:
                 # 在线程池中运行同步的评测方法
@@ -284,6 +279,17 @@ class DataFlowEvalNode(BaseNode):
                 completed = bench.meta.get("eval_progress", {}).get("completed_models", [])
                 completed.append(model_name)
                 bench.meta["eval_progress"]["completed_models"] = completed
+
+                # 标记该模型完成
+                if thread_id:
+                    set_progress(f"{thread_id}:{model_name}", {
+                        "bench_name": bench.bench_name,
+                        "model_name": model_name,
+                        "stage": "done",
+                        "generated": int((bench.meta.get("eval_progress") or {}).get("generated") or 0),
+                        "total": int((bench.meta.get("eval_progress") or {}).get("total") or 0),
+                        "percent": 100.0,
+                    })
 
                 return model_name, {
                     "success": True,

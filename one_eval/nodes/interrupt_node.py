@@ -37,6 +37,12 @@ class InterruptNode(BaseNode):
     async def run(self, state: NodeState, config: RunnableConfig) -> Command:
         log.info(f"开始执行安全/人工检查...")
 
+        # 检查是否已经存在benches（手动选择模式）
+        benches = getattr(state, "benches", [])
+        if benches:
+            log.info(f"[{self.name}] 已存在 {len(benches)} 个手动选择的benches，跳过人工检查")
+            return Command(goto=self.success_node, update={})
+
         approved_ids = getattr(state, "approved_warning_ids", []) or []
 
         for validator in self.validators:

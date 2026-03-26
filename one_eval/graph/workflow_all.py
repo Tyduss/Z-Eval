@@ -36,9 +36,31 @@ log = get_logger("OneEvalWorkflow-All")
 def _route_after_eval(state: NodeState) -> str:
     benches = getattr(state, "benches", None) or []
     cursor = int(getattr(state, "eval_cursor", 0) or 0)
+
+    # 如果还有评测集需要评测，继续评测
     if cursor < len(benches):
         return "DataFlowEvalNode"
-    return "MetricRecommendNode"
+
+    # 检查是否是无参考答案的评测（仅生成模式）
+    has_reference_answers = False
+    for bench in benches:
+        meta = getattr(bench, "meta", {}) or {}
+        eval_results = meta.get("eval_results", {})
+        for model_name, result in eval_results.items():
+            stats = result.get("stats", {})
+            if stats:
+                has_reference_answers = True
+                break
+        if has_reference_answers:
+            break
+
+    if has_reference_answers:
+        # 有参考答案 → 正常流程：指标推荐 → 人工审核 → 打分 → 报告
+        return "MetricRecommendNode"
+    else:
+        # 无参考答案（仅生成模式）→ 跳过指标推荐和打分，直接生成报告
+        log.info("No reference answers found. Skipping metric/score phases, going directly to ReportGenNode.")
+        return "ReportGenNode"
 
 
 def build_complete_workflow(checkpointer=None):
@@ -222,12 +244,17 @@ async def run_full_pipeline(user_query: str, thread_id: str = "demo_full_run", m
                 # You can provide feedback here if automating, or CLI input
                 # For demo purposes, we assume acceptance
                 out = await graph.ainvoke(
-                    Command(resume="approved"), 
+                    Command(resume="approved"),
                     config=config
                 )
-            else:
+            elif snap and snap.next:
+                # 有其他节点需要执行，继续工作流
                 log.info("Resuming existing workflow...")
                 out = await graph.ainvoke(None, config=config)
+            else:
+                # 工作流已经结束，返回当前状态
+                log.info("Workflow already completed, returning current state")
+                out = snap
 
         if mode == "run":
             results_dir = project_root / "outputs"

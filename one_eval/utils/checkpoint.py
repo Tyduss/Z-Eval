@@ -1,7 +1,18 @@
 import os, shutil, tempfile
 from pathlib import Path
 from contextlib import asynccontextmanager
+import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+_SERDE = JsonPlusSerializer(
+    allowed_msgpack_modules=[
+        ("one_eval.core.state", "ModelConfig"),
+        ("one_eval.core.state", "BenchInfo"),
+        ("one_eval.core.state", "MainRequest"),
+        ("one_eval.core.state", "NodeState"),
+    ]
+)
 
 def _copy_sqlite_with_wal(src_db: Path, dst_db: Path):
     # 复制主 db
@@ -20,10 +31,10 @@ async def get_checkpointer(base_db: Path, mode: str):
     base_db.parent.mkdir(parents=True, exist_ok=True)
 
     if mode == "run":
-        async with AsyncSqliteSaver.from_conn_string(str(base_db)) as cp:
-            # Optimize SQLite for concurrency
-            # await cp.conn.execute("PRAGMA journal_mode=WAL;")
-            await cp.conn.execute("PRAGMA busy_timeout=3000;") # 3s timeout
+        async with aiosqlite.connect(str(base_db)) as conn:
+            cp = AsyncSqliteSaver(conn, serde=_SERDE)
+            await cp.conn.execute("PRAGMA busy_timeout=3000;")
+            await cp.setup()
             yield cp
         return
 
@@ -34,10 +45,10 @@ async def get_checkpointer(base_db: Path, mode: str):
 
     try:
         _copy_sqlite_with_wal(base_db, tmp_db)
-        async with AsyncSqliteSaver.from_conn_string(str(tmp_db)) as cp:
-            # Optimize SQLite for concurrency
-            # await cp.conn.execute("PRAGMA journal_mode=WAL;")
+        async with aiosqlite.connect(str(tmp_db)) as conn:
+            cp = AsyncSqliteSaver(conn, serde=_SERDE)
             await cp.conn.execute("PRAGMA busy_timeout=3000;")
+            await cp.setup()
             yield cp
     finally:
         # 清理临时 db 及其 wal/shm

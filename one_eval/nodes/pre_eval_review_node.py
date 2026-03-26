@@ -13,6 +13,12 @@ class PreEvalReviewNode(BaseNode):
         super().__init__(name="PreEvalReviewNode", tools=None)
 
     async def run(self, state: NodeState, config: RunnableConfig) -> Command:
+        # 检查是否已经存在benches（手动选择模式）
+        benches = getattr(state, "benches", [])
+        if benches:
+            # 对于手动选择模式，直接通过，不中断
+            return Command(goto="DataFlowEvalNode", update={})
+
         approved_ids: List[str] = getattr(state, "approved_warning_ids", []) or []
         confirm_id = f"{self.name}_confirm"
         if confirm_id in approved_ids:

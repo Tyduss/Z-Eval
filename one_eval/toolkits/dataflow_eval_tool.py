@@ -32,6 +32,8 @@ class DataFlowEvalTool:
 
     # Class-level cache for multiple LLM servings (key = config hash)
     _cached_llm_servings: Dict[str, LLMServingABC] = {}
+    # 保护 _cached_llm_servings 和 os.environ["DF_API_KEY"] 的并发写入
+    _init_lock = threading.Lock()
 
     @classmethod
     def _make_config_key(cls, config: ModelConfig) -> str:
@@ -47,14 +49,17 @@ class DataFlowEvalTool:
     def __init__(self, output_root: str = "cache/eval_results"):
         self.output_root = output_root
         os.makedirs(self.output_root, exist_ok=True)
-        self.llm_serving: Optional[LLMServingABC] = None
-        self._current_model_config: Optional[ModelConfig] = None
 
-    def _init_llm_serving(self, config: ModelConfig):
-        """初始化或更新 LLM Serving（支持多模型缓存）"""
+    def _get_or_init_llm_serving(self, config: ModelConfig) -> LLMServingABC:
+        """获取或初始化 LLM Serving（线程安全，返回实例而非写入 self）
+
+        多模型并行评测时，多个线程同时调用 run_eval，
+        如果直接写 self.llm_serving 会导致线程间互相覆盖。
+        因此改为返回局部 serving 实例，调用方自行持有引用。
+        """
         config_key = self._make_config_key(config)
 
-        # Check if we already have this model's serving cached
+        # 快速路径：无锁检查缓存
         if config_key in DataFlowEvalTool._cached_llm_servings:
             cached = DataFlowEvalTool._cached_llm_servings[config_key]
             # 检查是否损坏（仅本地模型）
@@ -68,19 +73,11 @@ class DataFlowEvalTool:
                         pass
                     del DataFlowEvalTool._cached_llm_servings[config_key]
                 else:
-                    self.llm_serving = cached
-                    self._current_model_config = config
                     log.info(f"Using cached serving for {config_key}")
-                    return
-
-        # 清理旧的实例（如果当前实例存在且配置不同）
-        if self.llm_serving and self._current_model_config and self._make_config_key(self._current_model_config) != config_key:
-            try:
-                log.info("Cleaning up old LLM serving instance...")
-                if hasattr(self.llm_serving, "cleanup"):
-                    self.llm_serving.cleanup()
-            except Exception as e:
-                log.warning(f"Failed to cleanup old serving: {e}")
+                    return cached
+            else:
+                log.info(f"Using cached serving for {config_key}")
+                return cached
 
         model_name_or_path = config.model_name_or_path
         if isinstance(model_name_or_path, str) and model_name_or_path:
@@ -100,17 +97,25 @@ class DataFlowEvalTool:
             model_name_or_path = p
 
         log.info(f"Initializing LLM Serving: {model_name_or_path} (is_api={config.is_api})")
-        
+
+        serving = None
         if config.is_api:
-            self.llm_serving = APILLMServing_request(
-                api_url=config.api_url,
-                model_name=model_name_or_path,
-                api_key=config.api_key,
-                max_workers=16, # 默认并发
-                # API 模式下的 generation 参数通常在调用时传递，或者由 Serving 类处理
-            )
+            # APILLMServing_request reads key from env var DF_API_KEY, not from params
+            # 加锁保护 os.environ 写入 + __init__ 读取，防止并发覆盖
+            api_url = config.api_url or ""
+            if api_url and not api_url.endswith("/chat/completions"):
+                api_url = api_url.rstrip("/") + "/chat/completions"
+                log.info(f"Normalized api_url to: {api_url}")
+            with DataFlowEvalTool._init_lock:
+                if config.api_key:
+                    os.environ["DF_API_KEY"] = config.api_key
+                serving = APILLMServing_request(
+                    api_url=api_url,
+                    model_name=model_name_or_path,
+                    max_workers=16,
+                )
         else:
-            self.llm_serving = LocalModelLLMServing_vllm(
+            serving = LocalModelLLMServing_vllm(
                 hf_model_name_or_path=model_name_or_path,
                 vllm_tensor_parallel_size=config.tensor_parallel_size,
                 vllm_max_tokens=config.max_tokens,
@@ -121,16 +126,15 @@ class DataFlowEvalTool:
                 vllm_seed=getattr(config, "seed", None),
                 vllm_max_model_len=getattr(config, "max_model_len", None),
                 vllm_gpu_memory_utilization=getattr(config, "gpu_memory_utilization", 0.9),
-                # trust_remote_code=True, # 默认信任，State 中已移除该配置
             )
             try:
-                self.llm_serving.start_serving()
-                if not hasattr(self.llm_serving, "tokenizer"):
+                serving.start_serving()
+                if not hasattr(serving, "tokenizer"):
                     raise RuntimeError("vLLM serving initialized without tokenizer")
             except Exception as e:
                 try:
-                    if hasattr(self.llm_serving, "backend_initialized"):
-                        self.llm_serving.backend_initialized = False
+                    if hasattr(serving, "backend_initialized"):
+                        serving.backend_initialized = False
                 except Exception:
                     pass
                 # 清理缓存
@@ -138,15 +142,24 @@ class DataFlowEvalTool:
                     del DataFlowEvalTool._cached_llm_servings[config_key]
                 raise RuntimeError(f"Local vLLM serving init failed: {e}") from e
 
-        self._current_model_config = config
-
         # Update class-level cache (multi-model)
-        DataFlowEvalTool._cached_llm_servings[config_key] = self.llm_serving
+        with DataFlowEvalTool._init_lock:
+            DataFlowEvalTool._cached_llm_servings[config_key] = serving
         log.info(f"Cached serving for {config_key}")
+        return serving
 
     def _preprocess_dataframe(self, df, bench_name, key_mapping, cache_path="", eval_type=""):
         """Ad-hoc 数据预处理"""
-        
+
+        # 0. 修正 input_question_key：确保 key_mapping 中的 question key
+        # 与 dataframe 中实际的列名一致
+        input_question_key = key_mapping.get("input_question_key")
+        if input_question_key and input_question_key not in df.columns:
+            # key_mapping 记录的列名在 df 中不存在，尝试用 "question" 列
+            if "question" in df.columns:
+                key_mapping["input_question_key"] = "question"
+                log.info(f"[{bench_name}] Corrected input_question_key from '{input_question_key}' to 'question'")
+
         # 1. 自动合并 choices
         choices_key = key_mapping.get("input_choices_key")
         if isinstance(choices_key, list):
@@ -173,7 +186,7 @@ class DataFlowEvalTool:
                     df["choices"] = [["False", "True"]] * len(df)
                     key_mapping["input_choices_key"] = "choices"
                     log.info(f"[{bench_name}] Auto-injected default choices ['False', 'True'] for key3_q_choices_a")
-        
+
         return df, key_mapping
 
     def _extract_path_value(self, obj: Any, path: str) -> Any:
@@ -238,8 +251,8 @@ class DataFlowEvalTool:
         if not bench.bench_dataflow_eval_type:
             raise ValueError(f"Bench {bench.bench_name} missing bench_dataflow_eval_type")
 
-        # 1. 准备 Serving
-        self._init_llm_serving(model_config)
+        # 1. 准备 Serving（用局部变量持有，避免多线程并发时 self.llm_serving 被覆盖）
+        llm_serving = self._get_or_init_llm_serving(model_config)
 
         # 2. 准备路径（包含模型名）
         timestamp = int(time.time())
@@ -281,32 +294,35 @@ class DataFlowEvalTool:
 
         # 4. 初始化 Storage
         # cache_type="jsonl" 对应 .jsonl 文件
+
+        # === Ad-hoc 预处理 ===
+        # 读取初始数据，进行必要的列注入，写到一个独立的预处理文件
+        # 注意：不能使用 storage.write()，因为 operator_step=-1 时会覆盖原始文件
+        preprocessed_path = input_dataset_path
+        try:
+            df = pd.read_json(input_dataset_path, lines=True)
+            df, key_mapping = self._preprocess_dataframe(
+                df,
+                bench.bench_name,
+                key_mapping,
+                cache_path=input_dataset_path,
+                eval_type=bench.bench_dataflow_eval_type
+            )
+            # 写入独立预处理文件，避免覆盖原始数据
+            preprocessed_path = os.path.join(step_cache_dir, "step_step0.jsonl")
+            os.makedirs(step_cache_dir, exist_ok=True)
+            df.to_json(preprocessed_path, orient="records", lines=True, force_ascii=False)
+            log.info(f"[{bench.bench_name}] Preprocessed data written to {preprocessed_path}")
+        except Exception as e:
+            log.error(f"[{bench.bench_name}] 预处理失败: {e}")
+            log.error(traceback.format_exc())
+
         storage = FileStorage(
-            first_entry_file_name=input_dataset_path,
+            first_entry_file_name=preprocessed_path,
             cache_path=step_cache_dir,
             file_name_prefix="step",
             cache_type="jsonl",
         )
-        
-        # === Ad-hoc 预处理 ===
-        # 读取初始数据，进行必要的列注入，然后写回
-        try:
-            # 直接读取原始文件，而不是通过 storage.read (因为它要求先 step)
-            # 假设 dataset_cache 是 jsonl
-            df = pd.read_json(input_dataset_path, lines=True)
-            df, key_mapping = self._preprocess_dataframe(
-                df, 
-                bench.bench_name, 
-                key_mapping, 
-                cache_path=input_dataset_path,
-                eval_type=bench.bench_dataflow_eval_type
-            )
-            # 写回作为 step_0 (这将推进 storage 的 step 计数)
-            storage.write(df)
-        except Exception as e:
-            log.error(f"[{bench.bench_name}] 预处理失败: {e}")
-            log.error(traceback.format_exc())
-            # 如果预处理失败，我们继续尝试，也许不需要预处理也能跑
         
         # 提取关键字段名
         q_key = key_mapping.get("input_question_key")
@@ -340,7 +356,7 @@ class DataFlowEvalTool:
         prompt_tmpl = FormatStrPrompt(f_str_template="{{question}}\nAnswer:")
         
         generator = BenchAnswerGenerator(
-            llm_serving=self.llm_serving,
+            llm_serving=llm_serving,
             eval_type=bench.bench_dataflow_eval_type,
             prompt_template=prompt_tmpl,
             allow_overwrite=False,
@@ -387,76 +403,91 @@ class DataFlowEvalTool:
             log.error(f"[{bench.bench_name}] Generator failed: {e}")
             log.error(traceback.format_exc())
             # 强制重置 serving，防止脏状态
-            self.llm_serving = None
+            llm_serving = None
             raise e
 
         # 6. Step 2: Evaluator
-        evaluator = UnifiedBenchDatasetEvaluator(
-            eval_result_path=eval_result_path, # 这里的 path 其实是统计结果落盘 path？
-            # UnifiedBenchDatasetEvaluator 的 eval_result_path 是存 stats json 的
-            # 但是它也会把 per-sample 结果写回 dataframe (storage)
-            llm_serving=self.llm_serving,
-            eval_type=bench.bench_dataflow_eval_type,
-            prompt_template=None,
-            use_semantic_judge=False, # 暂不启用 semantic judge，除非显式指定
-            metric_type=None,
-        )
+        # 先检查 step1 输出中是否包含 target_key 列（参考答案列）
+        # 如果数据集没有参考答案（如纯生成任务），跳过评估步骤
+        skip_evaluator = False
+        required_target_keys = [k for k in [target_key, targets_key, label_key, labels_key, better_key] if k]
+        if required_target_keys:
+            try:
+                step1_df = pd.read_json(step1_output_path, lines=True)
+                missing_target_keys = [k for k in required_target_keys if k not in step1_df.columns]
+                if missing_target_keys:
+                    log.warning(
+                        f"[{bench.bench_name}] 数据集缺少参考答案列 {missing_target_keys}，"
+                        f"跳过评估步骤（仅保留生成结果）"
+                    )
+                    skip_evaluator = True
+            except Exception as e:
+                log.warning(f"[{bench.bench_name}] 无法读取 step1 输出来检查列: {e}")
 
-        log.info(f"[{bench.bench_name}] Running Step 2: Evaluator")
-        _emit("evaluator", generated=total_rows, total=total_rows, percent=100.0)
-        
-        # 收集所有可能的 input keys
-        eval_kwargs = {
-            "storage": storage.step(),
-            "input_question_key": q_key,
-            "input_context_key": ctx_key,
-            "input_pred_key": "generated_ans",
-            "input_text_key": text_key,
-            "input_target_key": target_key,
-            "input_targets_key": targets_key,
-            "input_choices_key": choices_key,
-            "input_label_key": label_key,
-            "input_labels_key": labels_key,
-            "input_better_key": better_key,
-            "input_rejected_key": rejected_key,
-        }
-        # 过滤 None 和 空字符串
-        eval_kwargs = {k: v for k, v in eval_kwargs.items() if v}
-        
-        try:
-            evaluator.run(**eval_kwargs)
-        except Exception as e:
-            log.error(f"[{bench.bench_name}] Evaluator failed: {e}")
-            log.error(traceback.format_exc())
-            # Evaluator 失败通常不涉及 serving 状态，但为了保险起见
-            self.llm_serving = None
-            raise e
+        if skip_evaluator:
+            log.info(f"[{bench.bench_name}] 跳过 Evaluator（无参考答案）")
+            _emit("evaluator", generated=total_rows, total=total_rows, percent=100.0)
+        else:
+            evaluator = UnifiedBenchDatasetEvaluator(
+                eval_result_path=eval_result_path,
+                llm_serving=llm_serving,
+                eval_type=bench.bench_dataflow_eval_type,
+                prompt_template=None,
+                use_semantic_judge=False,
+                metric_type=None,
+            )
+
+            log.info(f"[{bench.bench_name}] Running Step 2: Evaluator")
+            _emit("evaluator", generated=total_rows, total=total_rows, percent=100.0)
+
+            # 收集所有可能的 input keys
+            eval_kwargs = {
+                "storage": storage.step(),
+                "input_question_key": q_key,
+                "input_context_key": ctx_key,
+                "input_pred_key": "generated_ans",
+                "input_text_key": text_key,
+                "input_target_key": target_key,
+                "input_targets_key": targets_key,
+                "input_choices_key": choices_key,
+                "input_label_key": label_key,
+                "input_labels_key": labels_key,
+                "input_better_key": better_key,
+                "input_rejected_key": rejected_key,
+            }
+            # 过滤 None 和 空字符串
+            eval_kwargs = {k: v for k, v in eval_kwargs.items() if v}
+
+            try:
+                evaluator.run(**eval_kwargs)
+            except Exception as e:
+                log.error(f"[{bench.bench_name}] Evaluator failed: {e}")
+                log.error(traceback.format_exc())
+                llm_serving = None
+                raise e
 
         # 7. 获取结果
-        # step2 产生的文件是包含完整数据的
-        # storage.step() 调用了两次，现在 index 是 2 (0->1->2)
-        # 实际上 evaluator 跑完后，结果在 storage 当前指向的文件里
-        # FileStorage 的 step() 会移动指针，所以我们需要获取“上一步”的文件名，或者当前最新的文件
-        # FileStorage 没有直接暴露 current file path，但我们可以推断
-        # file_name_prefix="step" -> step_0.jsonl (input), step_1.jsonl (gen output), step_2.jsonl (eval output)
-        
-        # 简单起见，我们列出 step_cache_dir 下最新的 jsonl
-        files = sorted([f for f in os.listdir(step_cache_dir) if f.endswith(".jsonl") and f.startswith("step_")])
-        if not files:
-            raise RuntimeError("No step files generated")
-        last_step_file = os.path.join(step_cache_dir, files[-1])
+        if skip_evaluator:
+            # 无参考答案时，step1 输出就是最终结果
+            last_step_file = step1_output_path
+            stats = {}
+            log.info(f"[{bench.bench_name}] 仅生成模式（无参考答案），stats 为空")
+        else:
+            # step2 产生的文件是包含完整数据的
+            files = sorted([f for f in os.listdir(step_cache_dir) if f.endswith(".jsonl") and f.startswith("step_")])
+            if not files:
+                raise RuntimeError("No step files generated")
+            last_step_file = os.path.join(step_cache_dir, files[-1])
 
-        # 读取统计结果
-        # Evaluator 会把 stats 写入 eval_result_path (这是一个 json 文件，不是 jsonl)
-        # 注意 UnifiedBenchDatasetEvaluator 代码里：df.to_json(..., orient="records")
-        stats = {}
-        if os.path.exists(eval_result_path):
-            try:
-                stats_df = pd.read_json(eval_result_path)
-                if not stats_df.empty:
-                    stats = stats_df.iloc[0].to_dict()
-            except Exception as e:
-                log.error(f"Failed to read stats from {eval_result_path}: {e}")
+            # 读取统计结果
+            stats = {}
+            if os.path.exists(eval_result_path):
+                try:
+                    stats_df = pd.read_json(eval_result_path)
+                    if not stats_df.empty:
+                        stats = stats_df.iloc[0].to_dict()
+                except Exception as e:
+                    log.error(f"Failed to read stats from {eval_result_path}: {e}")
 
         return {
             "stats": stats,

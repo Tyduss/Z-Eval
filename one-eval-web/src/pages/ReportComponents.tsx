@@ -1,7 +1,9 @@
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { SimpleMarkdown } from "@/components/ui/simple-markdown";
+import { ResultPreviewModal } from "@/components/ui/result-preview-modal";
 import { BarChart2, PieChart, Activity } from "lucide-react";
+import { useState, useMemo } from "react";
 import type { Lang } from "@/lib/i18n";
 
 // --- Types ---
@@ -309,9 +311,62 @@ export const HistogramChart = ({ data, height = 200 }: { data: HistogramData; he
 };
 
 // --- Main Report View Component ---
-export const ReportView = ({ report, lang }: { report: ReportData, lang: Lang }) => {
+export const ReportView = ({ report, threadId, lang }: { report: ReportData; threadId: string | null; lang: Lang }) => {
     if (!report) return null;
     const tt = (zh: string, en: string) => (lang === "zh" ? zh : en);
+
+    const isGenerationOnly = (report as any).mode === "generation_only";
+
+    // 仅生成模式：简化报告（无参考答案，不显示图表）
+    if (isGenerationOnly) {
+        return (
+            <div className="space-y-8 animate-in fade-in duration-500 pb-20">
+                <div className="bg-gradient-to-r from-slate-900 to-slate-800 rounded-2xl p-8 text-white shadow-xl relative overflow-hidden">
+                    <div className="absolute top-0 right-0 w-64 h-64 bg-white/5 rounded-full blur-3xl -mr-16 -mt-16 pointer-events-none" />
+                    <div className="relative z-10">
+                        <div className="flex items-center gap-2 mb-2">
+                            <Activity className="w-5 h-5 text-emerald-400" />
+                            <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">
+                                {tt("评测报告", "Evaluation Report")}
+                                <span className="ml-2 px-2 py-0.5 bg-emerald-500/20 text-emerald-300 rounded-full text-[10px]">
+                                    {tt("仅生成模式", "Generation Only")}
+                                </span>
+                            </span>
+                        </div>
+                        <h1 className="text-3xl font-bold mb-2 text-white">{report.model}</h1>
+                        <div className="text-white text-sm max-w-xl leading-relaxed">
+                            <SimpleMarkdown content={report.llm_summary || tt("暂无摘要。", "No summary available.")} />
+                        </div>
+                        <div className="text-xs text-slate-400 mt-4">
+                            {tt("生成时间", "Generated at")} {new Date(report.generated_at * 1000).toLocaleDateString()}
+                        </div>
+                    </div>
+                </div>
+
+                {/* Bench List */}
+                <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+                    <div className="flex items-center gap-2 mb-4">
+                        <div className="p-2 bg-blue-100 text-blue-600 rounded-lg">
+                            <BarChart2 className="w-5 h-5" />
+                        </div>
+                        <h3 className="font-bold text-slate-800">{tt("评测集列表", "Benchmarks")}</h3>
+                    </div>
+                    <div className="space-y-2">
+                        {(report.overall.bench_summaries || []).map((b: any, i: number) => (
+                            <BenchResultItem
+                                key={i}
+                                bench={b.bench}
+                                model={b.model}
+                                detailPath={b.detail_path}
+                                threadId={threadId}
+                                lang={lang}
+                            />
+                        ))}
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="space-y-8 animate-in fade-in duration-500 pb-20">
@@ -334,7 +389,7 @@ export const ReportView = ({ report, lang }: { report: ReportData, lang: Lang })
                     <div className="text-right">
                         <div className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-1">{tt("综合得分", "Overall Score")}</div>
                         <div className="text-5xl font-black font-mono text-emerald-400 tracking-tight">
-                            {report.overall.score.toFixed(4)}
+                            {report.overall.score != null ? report.overall.score.toFixed(4) : tt("—", "N/A")}
                         </div>
                         <div className="text-xs text-slate-400 mt-2">
                             {tt("生成时间", "Generated at")} {new Date(report.generated_at * 1000).toLocaleDateString()}
@@ -427,5 +482,111 @@ export const ReportView = ({ report, lang }: { report: ReportData, lang: Lang })
                 </div>
             </div>
         </div>
+    );
+};
+
+// --- Bench Result Item with Preview Modal & Download ---
+const BenchResultItem = ({ bench, model, detailPath, threadId, lang }: { bench: string; model: string; detailPath: string; threadId: string | null; lang: Lang }) => {
+    const tt = (zh: string, en: string) => (lang === "zh" ? zh : en);
+    const apiBaseUrl = useMemo(() => localStorage.getItem("oneEval.apiBaseUrl") || "http://localhost:8000", []);
+    const [previewOpen, setPreviewOpen] = useState(false);
+    const [previewData, setPreviewData] = useState<{ total: number; columns: string[]; rows: any[] } | null>(null);
+    const [previewLoading, setPreviewLoading] = useState(false);
+    const [downloading, setDownloading] = useState(false);
+    const [fetchingAll, setFetchingAll] = useState(false);
+
+    const openPreview = async () => {
+        if (!threadId || !detailPath) return;
+        setPreviewOpen(true);
+        setPreviewLoading(true);
+        setPreviewData(null);
+        try {
+            const res = await fetch(`${apiBaseUrl}/api/eval/preview/${threadId}/${encodeURIComponent(bench)}/${encodeURIComponent(model)}?limit=5`);
+            const data = await res.json();
+            setPreviewData(data);
+        } catch {
+            setPreviewData(null);
+        } finally {
+            setPreviewLoading(false);
+        }
+    };
+
+    const handleDownload = async (format: "jsonl" | "csv" | "xlsx") => {
+        if (!threadId || !detailPath) return;
+        setDownloading(true);
+        try {
+            const endpoint = format === "jsonl"
+                ? `${apiBaseUrl}/api/eval/result/${threadId}/${encodeURIComponent(bench)}/${encodeURIComponent(model)}`
+                : `${apiBaseUrl}/api/eval/result/${format}/${threadId}/${encodeURIComponent(bench)}/${encodeURIComponent(model)}`;
+            const res = await fetch(endpoint);
+            if (!res.ok) return;
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${bench}_${model}_results.${format}`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } finally {
+            setDownloading(false);
+        }
+    };
+
+    return (
+        <>
+            <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                <div className="flex items-center justify-between">
+                    <div>
+                        <span className="font-medium text-slate-700">{bench}</span>
+                        {model && <span className="ml-2 text-xs text-slate-400">{model}</span>}
+                    </div>
+                    <span className="text-xs px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full">
+                        {tt("已完成", "Done")}
+                    </span>
+                </div>
+                {detailPath && (
+                    <div className="flex gap-2 mt-2">
+                        <button
+                            onClick={openPreview}
+                            className="text-xs px-3 py-1 bg-white border border-slate-200 rounded-md text-slate-600 hover:bg-slate-100 hover:border-slate-300 transition-colors cursor-pointer"
+                        >
+                            {tt("预览", "Preview")}
+                        </button>
+                        <button
+                            onClick={handleDownload}
+                            disabled={downloading}
+                            className="text-xs px-3 py-1 bg-white border border-slate-200 rounded-md text-slate-600 hover:bg-slate-100 hover:border-slate-300 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            {downloading ? tt("下载中...", "Downloading...") : tt("下载", "Download")}
+                        </button>
+                    </div>
+                )}
+            </div>
+            {/* Preview Modal */}
+            <ResultPreviewModal
+                open={previewOpen}
+                onClose={() => setPreviewOpen(false)}
+                previewData={previewData}
+                loading={previewLoading}
+                error={!previewLoading && !previewData}
+                lang={lang}
+                title={bench}
+                subtitle={model}
+                onDownload={handleDownload}
+                downloading={downloading}
+                fetchingAll={fetchingAll}
+                onFetchAll={async () => {
+                    if (!threadId) throw new Error();
+                    setFetchingAll(true);
+                    try {
+                        const res = await fetch(`${apiBaseUrl}/api/eval/preview/${threadId}/${encodeURIComponent(bench)}/${encodeURIComponent(model)}?limit=99999`);
+                        if (!res.ok) throw new Error();
+                        return await res.json();
+                    } finally { setFetchingAll(false); }
+                }}
+            />
+        </>
     );
 };

@@ -1,8 +1,8 @@
 import React, { useRef, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
-    Send, Check, Loader2, AlertCircle, ChevronDown, ChevronUp, 
-    Database, Bot, Maximize2, X, Save as SaveIcon, Tag
+    Send, Check, Loader2, AlertCircle, ChevronDown, ChevronUp,
+    Database, Bot, Maximize2, X, Save as SaveIcon, Tag, Upload
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -718,13 +718,15 @@ interface ChatPanelProps {
     lang: Lang;
     interruptToken?: string | null;
     currentNode?: string | null;
-    evalProgress?: {
+    evalProgress?: Array<{
         bench_name?: string;
         stage?: string;
         generated?: number;
         total?: number;
         percent?: number;
-    } | null;
+        model?: string;
+        current?: number;
+    }> | null;
 }
 
 const EMOJIS = ["✨", "🤖", "🚀", "💡", "🔮", "✅", "🎯"];
@@ -786,14 +788,57 @@ const getNodeStage = (nodeName: string | null | undefined, lang: string = "zh"):
     return stage ? (lang === "zh" ? stage.zh : stage.en) : (lang === "zh" ? "处理中" : "Processing");
 };
 
-const getOverallProgress = (nodeName: string | null | undefined, evalProgress?: { percent?: number } | null): number => {
+// 从进度数组中获取主要进度信息
+const getPrimaryProgress = (evalProgress?: Array<{
+    bench_name?: string;
+    stage?: string;
+    generated?: number;
+    total?: number;
+    percent?: number;
+    model?: string;
+    current?: number;
+}> | null): {
+    percent?: number;
+    bench_name?: string;
+    stage?: string;
+    generated?: number;
+    total?: number;
+    model?: string;
+    current?: number;
+} | null => {
+    if (!evalProgress || !Array.isArray(evalProgress) || evalProgress.length === 0) {
+        return null;
+    }
+
+    // 如果有进度百分比，使用第一个有百分比的项目
+    const withPercent = evalProgress.find(p => p.percent !== undefined);
+    if (withPercent) {
+        return withPercent;
+    }
+
+    // 否则使用第一个项目
+    return evalProgress[0];
+};
+
+const getOverallProgress = (nodeName: string | null | undefined, evalProgress?: Array<{
+    bench_name?: string;
+    stage?: string;
+    generated?: number;
+    total?: number;
+    percent?: number;
+    model?: string;
+    current?: number;
+}> | null): number => {
     if (!nodeName) return 0;
 
+    // 从进度数组中获取主要进度信息
+    const primaryProgress = getPrimaryProgress(evalProgress);
+
     // 如果有评测进度，优先使用
-    if (evalProgress?.percent !== undefined && nodeName === "DataFlowEvalNode") {
+    if (primaryProgress?.percent !== undefined && nodeName === "DataFlowEvalNode") {
         // 评测节点占总进度的 40%，前面节点占 40%，后面占 20%
         const baseProgress = 40;
-        return baseProgress + (evalProgress.percent * 0.4);
+        return baseProgress + (primaryProgress.percent * 0.4);
     }
 
     const idx = NODE_ORDER.indexOf(nodeName);
@@ -969,11 +1014,14 @@ export const ChatPanel = ({ messages, status, onSendMessage, onConfirm, onStop, 
                                      <div className="space-y-2">
                                          <div className="flex items-center justify-between text-xs">
                                              <span className="text-slate-600">{getNodeStage(currentNode)}</span>
-                                             {evalProgress && (
-                                                 <span className="text-blue-600 font-medium">
-                                                     {evalProgress.percent ? `${Math.round(evalProgress.percent)}%` : ""}
-                                                 </span>
-                                             )}
+                                             {(() => {
+                                                 const primaryProgress = getPrimaryProgress(evalProgress);
+                                                 return primaryProgress && primaryProgress.percent !== undefined && (
+                                                     <span className="text-blue-600 font-medium">
+                                                         {`${Math.round(primaryProgress.percent)}%`}
+                                                     </span>
+                                                 );
+                                             })()}
                                          </div>
 
                                          {/* 主进度条 */}
@@ -985,28 +1033,41 @@ export const ChatPanel = ({ messages, status, onSendMessage, onConfirm, onStop, 
                                          </div>
 
                                          {/* 评测进度详情 */}
-                                         {evalProgress && (
-                                             <div className="mt-3 p-2 bg-white/50 rounded-lg text-xs space-y-1">
-                                                 {evalProgress.bench_name && (
-                                                     <div className="flex items-center justify-between">
-                                                         <span className="text-slate-500">{tt("当前评测集", "Current Bench")}</span>
-                                                         <span className="font-medium text-slate-700">{evalProgress.bench_name}</span>
-                                                     </div>
-                                                 )}
-                                                 {evalProgress.stage && (
-                                                     <div className="flex items-center justify-between">
-                                                         <span className="text-slate-500">{tt("阶段", "Stage")}</span>
-                                                         <span className="font-medium text-slate-700">{evalProgress.stage}</span>
-                                                     </div>
-                                                 )}
-                                                 {evalProgress.generated !== undefined && evalProgress.total && (
-                                                     <div className="flex items-center justify-between">
-                                                         <span className="text-slate-500">{tt("进度", "Progress")}</span>
-                                                         <span className="font-medium text-slate-700">{evalProgress.generated} / {evalProgress.total}</span>
-                                                     </div>
-                                                 )}
-                                             </div>
-                                         )}
+                                         {(() => {
+                                             const primaryProgress = getPrimaryProgress(evalProgress);
+                                             if (!primaryProgress) return null;
+
+                                             return (
+                                                 <div className="mt-3 p-2 bg-white/50 rounded-lg text-xs space-y-1">
+                                                     {primaryProgress.bench_name && (
+                                                         <div className="flex items-center justify-between">
+                                                             <span className="text-slate-500">{tt("当前评测集", "Current Bench")}</span>
+                                                             <span className="font-medium text-slate-700">{primaryProgress.bench_name}</span>
+                                                         </div>
+                                                     )}
+                                                     {primaryProgress.stage && (
+                                                         <div className="flex items-center justify-between">
+                                                             <span className="text-slate-500">{tt("阶段", "Stage")}</span>
+                                                             <span className="font-medium text-slate-700">{primaryProgress.stage}</span>
+                                                         </div>
+                                                     )}
+                                                     {primaryProgress.model && (
+                                                         <div className="flex items-center justify-between">
+                                                             <span className="text-slate-500">{tt("模型", "Model")}</span>
+                                                             <span className="font-medium text-slate-700">{primaryProgress.model}</span>
+                                                         </div>
+                                                     )}
+                                                     {(primaryProgress.generated !== undefined || primaryProgress.current !== undefined) && (primaryProgress.total !== undefined) && (
+                                                         <div className="flex items-center justify-between">
+                                                             <span className="text-slate-500">{tt("进度", "Progress")}</span>
+                                                             <span className="font-medium text-slate-700">
+                                                                 {(primaryProgress.generated !== undefined ? primaryProgress.generated : primaryProgress.current || 0)} / {primaryProgress.total}
+                                                             </span>
+                                                         </div>
+                                                     )}
+                                                 </div>
+                                             );
+                                         })()}
 
                                          {/* 节点步骤指示器 */}
                                          <div className="flex items-center gap-1 mt-3">
@@ -1364,9 +1425,10 @@ const SummaryBenchCard = ({ bench, lang }: { bench: any, lang: Lang }) => {
 };
 
 // --- Summary Panel Component ---
-export const SummaryPanel = ({ state, sidebarWidth, chatWidth, lang }: { 
-    state: WorkflowState | null, 
-    sidebarWidth: number, 
+export const SummaryPanel = ({ state, threadId, sidebarWidth, chatWidth, lang }: {
+    state: WorkflowState | null,
+    threadId: string | null,
+    sidebarWidth: number,
     chatWidth: number,
     lang: Lang
 }) => {
@@ -1465,7 +1527,7 @@ export const SummaryPanel = ({ state, sidebarWidth, chatWidth, lang }: {
                                 ) : (
                                     <div className="p-8 overflow-y-auto flex-1 min-h-[400px] scrollbar-thin scrollbar-thumb-slate-200">
                                         <div className="max-w-5xl mx-auto">
-                                            <ReportView report={state.reports?.["default"]} lang={lang} />
+                                            <ReportView report={state.reports?.["default"]} threadId={threadId} lang={lang} />
                                         </div>
                                     </div>
                                 )}
@@ -1527,6 +1589,11 @@ export const GalleryModal = ({ isOpen, onClose, onSelect, apiBaseUrl, lang }: { 
         return b.meta?.category || '';
     };
 
+    const isUploaded = (b: any) =>
+        b?.meta?.source === "local_upload" ||
+        (b?.meta?.artifact_paths && b.meta.artifact_paths.length > 0) ||
+        b?.bench_source_url?.startsWith("local://");
+
     const filtered = Array.isArray(benches) ? benches.filter(b => {
         if (!b) return false;
         const searchLower = search.toLowerCase();
@@ -1538,6 +1605,13 @@ export const GalleryModal = ({ isOpen, onClose, onSelect, apiBaseUrl, lang }: { 
                description.includes(searchLower) ||
                tags.includes(searchLower) ||
                category.includes(searchLower);
+    }).sort((a, b) => {
+        // 手动上传的排在前面
+        const aUploaded = isUploaded(a);
+        const bUploaded = isUploaded(b);
+        if (aUploaded && !bUploaded) return -1;
+        if (!aUploaded && bUploaded) return 1;
+        return 0;
     }) : [];
 
     return (
@@ -1562,13 +1636,22 @@ export const GalleryModal = ({ isOpen, onClose, onSelect, apiBaseUrl, lang }: { 
                         {filtered.map(b => {
                             const tags = getTags(b);
                             const category = getCategory(b);
+                            const uploaded = isUploaded(b);
                             return (
-                                <div key={b.bench_name} className="flex items-center justify-between p-3 rounded-lg border border-slate-100 hover:border-blue-200 hover:bg-blue-50/30 transition-all cursor-pointer group"
+                                <div key={b.bench_name} className={cn("flex items-center justify-between p-3 rounded-lg border transition-all cursor-pointer group",
+                                    uploaded ? "border-emerald-200 bg-emerald-50/30 hover:border-emerald-300" : "border-slate-100 hover:border-blue-200 hover:bg-blue-50/30"
+                                )}
                                     onClick={() => onSelect(b)}
                                 >
                                     <div className="flex-1 min-w-0">
                                         <div className="font-bold text-slate-700 text-sm flex items-center gap-2 flex-wrap">
+                                            {uploaded && <Upload className="w-3.5 h-3.5 text-emerald-600" />}
                                             {getDisplayName(b)}
+                                            {uploaded && (
+                                                <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 rounded">
+                                                    {tt("本地上传", "Uploaded")}
+                                                </span>
+                                            )}
                                             {category && (
                                                 <span className="text-[10px] bg-blue-100 text-blue-600 px-1.5 rounded">
                                                     {category}

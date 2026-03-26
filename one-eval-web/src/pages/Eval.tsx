@@ -1,14 +1,16 @@
 import { useState, useEffect, useMemo, type ReactNode, type MouseEvent } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
 import { motion } from "framer-motion";
-import { 
-    Clock, X, Search, Database, Play, Save, Layers, Plus, BookOpen, Trash2, AlertTriangle, Settings, ChevronRight, ChevronDown, Check, RefreshCw, Bot, Tag, ChevronUp
+import {
+    Clock, X, Search, Database, Play, Save, Layers, Plus, BookOpen, Trash2, AlertTriangle, Settings, ChevronRight, ChevronDown, Check, RefreshCw, Bot, Tag, ChevronUp, Eye, Download, FileText
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { ChatPanel, WorkflowBlock, SummaryPanel, Bench, WorkflowState, BenchCard, GalleryModal } from "./EvalComponents";
 import { SimpleMarkdown } from "@/components/ui/simple-markdown";
+import { ResultPreviewModal } from "@/components/ui/result-preview-modal";
 import { useLang } from "@/lib/i18n";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
@@ -20,13 +22,14 @@ interface StatusResponse {
   state_values: WorkflowState | null;
   current_node?: string; 
   interrupts?: Array<{ value?: unknown }>;
-  eval_progress?: {
+  eval_progress?: Array<{
     bench_name?: string;
+    model_name?: string;
     stage?: string;
     generated?: number;
     total?: number;
     percent?: number;
-  } | null;
+  }>;
 }
 
 interface HistoryItem {
@@ -52,6 +55,8 @@ interface MetricMeta {
 }
 
 export const Eval = () => {
+  const location = useLocation();
+  const navigate = useNavigate();
   const { lang, setLang, t } = useLang();
     const [metricRegistry, setMetricRegistry] = useState<MetricMeta[]>([]);
   const [workMode, setWorkMode] = useState<"agent" | "manual">(() => {
@@ -78,7 +83,7 @@ export const Eval = () => {
       return localStorage.getItem("oneEval.runningTask.currentNode") || null;
   });
   const [interruptToken, setInterruptToken] = useState<string | null>(null);
-  const [evalProgress, setEvalProgress] = useState<StatusResponse["eval_progress"]>(null);
+  const [evalProgress, setEvalProgress] = useState<StatusResponse["eval_progress"]>([]);
   
   // History
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -171,6 +176,14 @@ export const Eval = () => {
   const [useRAG, setUseRAG] = useState(true);
   const [localCount, setLocalCount] = useState(3);
   const [hfCount, setHfCount] = useState(2);
+
+  // Eval result preview modal state
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewCtx, setPreviewCtx] = useState<{ bench: string; model: string } | null>(null);
+  const [previewData, setPreviewData] = useState<{ total: number; columns: string[]; rows: Record<string, any>[] } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [fetchingAll, setFetchingAll] = useState(false);
 
   const apiBaseUrl = useMemo(() => localStorage.getItem("oneEval.apiBaseUrl") || "http://localhost:8000", []);
   const draftKey = useMemo(() => "oneEval.evalDraft", []);
@@ -322,7 +335,7 @@ export const Eval = () => {
                 }
 
         setStatus(data.status);
-        setEvalProgress(data.eval_progress ?? null);
+        setEvalProgress(Array.isArray(data.eval_progress) ? data.eval_progress : (data.eval_progress ? [data.eval_progress] : []));
         if (data.status === "interrupted") {
             const interruptValue = data.interrupts?.[0]?.value;
             const token = `${threadId || ""}|${data.next_node?.[0] || ""}|${JSON.stringify(interruptValue ?? "")}`;
@@ -375,6 +388,54 @@ export const Eval = () => {
 
     return () => clearInterval(interval);
   }, [threadId, status, isResuming, t]);
+
+  // Handle preSelectedBench from Gallery page navigation
+  useEffect(() => {
+      const preSelectedBench = (location.state as any)?.preSelectedBench;
+      if (preSelectedBench && status === "idle") {
+          // Clear the navigation state to prevent re-adding on refresh
+          navigate(location.pathname, { replace: true, state: {} });
+
+          // Switch to manual mode
+          setWorkMode("manual");
+          localStorage.setItem("oneEval.workMode", "manual");
+
+          // Fetch bench details and add to manualBenches
+          const fetchAndAddBench = async () => {
+              try {
+                  const res = await axios.get(`${apiBaseUrl}/api/benches/gallery`);
+                  const benches = res.data || [];
+                  const bench = benches.find((b: any) => b.bench_name === preSelectedBench || b.bench_name === decodeURIComponent(preSelectedBench));
+                  if (bench) {
+                      const inferredEvalTypeRaw =
+                          bench?.bench_dataflow_eval_type || bench?.eval_type || bench?.meta?.bench_dataflow_eval_type || "";
+                      const inferredEvalType = inferredEvalTypeRaw === "unknown" ? "" : String(inferredEvalTypeRaw || "");
+                      const keyMapping = bench?.meta?.key_mapping || bench?.key_mapping || {};
+
+                      const newBench = {
+                          bench_name: bench.bench_name,
+                          bench_dataflow_eval_type: inferredEvalType,
+                          dataset_cache: bench?.dataset_cache || "",
+                          meta: {
+                              ...bench.meta,
+                              key_mapping: keyMapping,
+                              source: "gallery",
+                              from_gallery: true
+                          }
+                      };
+                      setManualBenches(prev => {
+                          // Avoid duplicate
+                          if (prev.some(b => b.bench_name === newBench.bench_name)) return prev;
+                          return [...prev, newBench];
+                      });
+                  }
+              } catch (err) {
+                  console.error("Failed to fetch bench for preSelectedBench:", err);
+              }
+          };
+          fetchAndAddBench();
+      }
+  }, [location.state, status, apiBaseUrl, navigate]);
 
   // Sync state and params
   useEffect(() => {
@@ -734,8 +795,8 @@ export const Eval = () => {
   const handleGallerySelect = (bench: any) => {
       // Check duplicate
       if (editBenches.some(b => b.bench_name === bench.bench_name)) return;
-      
-      const safeTaskTypes = Array.isArray(bench.task_type) 
+
+      const safeTaskTypes = Array.isArray(bench.task_type)
           ? bench.task_type.map((t: any) => typeof t === 'object' ? JSON.stringify(t) : String(t))
           : [];
 
@@ -760,6 +821,35 @@ export const Eval = () => {
       setEditBenches([...editBenches, newBench]);
       setIsGalleryOpen(false);
   };
+
+  // 手动模式从 Gallery 选择评测集
+  const handleManualGallerySelect = (bench: any) => {
+      // Check duplicate
+      if (manualBenches.some(b => b.bench_name === bench.bench_name)) return;
+
+      const inferredEvalTypeRaw =
+          bench?.bench_dataflow_eval_type || bench?.eval_type || bench?.meta?.bench_dataflow_eval_type || "";
+      const inferredEvalType = inferredEvalTypeRaw === "unknown" ? "" : String(inferredEvalTypeRaw || "");
+
+      const keyMapping = bench?.meta?.key_mapping || bench?.key_mapping || {};
+
+      const newBench = {
+          bench_name: bench.bench_name,
+          bench_dataflow_eval_type: inferredEvalType,
+          dataset_cache: bench?.dataset_cache || "",
+          meta: {
+              ...bench.meta,
+              key_mapping: keyMapping,
+              source: "gallery",
+              from_gallery: true
+          }
+      };
+      setManualBenches(prev => [...prev, newBench]);
+      setIsGalleryOpen(false);
+  };
+
+  // Gallery 选择的目标模式（手动模式 vs 智能模式）
+  const [gallerySelectTarget, setGallerySelectTarget] = useState<"edit" | "manual">("edit");
 
   const handleBenchUpdate = (updatedBench: Bench, index: number) => {
       const newBenches = [...editBenches];
@@ -1423,15 +1513,26 @@ export const Eval = () => {
                        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 space-y-4">
                            <div className="flex items-center justify-between">
                                <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Benches</div>
-                               <Button
-                                   size="sm"
-                                   variant="outline"
-                                   className="gap-2"
-                                   disabled={status === "running"}
-                                   onClick={() => setManualBenches(prev => ([...prev, { bench_name: "", bench_dataflow_eval_type: "", dataset_cache: "", meta: {} } as any]))}
-                               >
-                                   <Plus className="w-4 h-4" /> Add Bench
-                               </Button>
+                               <div className="flex gap-2">
+                                   <Button
+                                       size="sm"
+                                       variant="outline"
+                                       className="gap-2"
+                                       disabled={status === "running"}
+                                       onClick={() => { setGallerySelectTarget("manual"); setIsGalleryOpen(true); }}
+                                   >
+                                       <BookOpen className="w-4 h-4" /> {t({ zh: "从基准库添加", en: "From Gallery" })}
+                                   </Button>
+                                   <Button
+                                       size="sm"
+                                       variant="outline"
+                                       className="gap-2"
+                                       disabled={status === "running"}
+                                       onClick={() => setManualBenches(prev => ([...prev, { bench_name: "", bench_dataflow_eval_type: "", dataset_cache: "", meta: {} } as any]))}
+                                   >
+                                       <Plus className="w-4 h-4" /> Add Bench
+                                   </Button>
+                               </div>
                            </div>
 
                            <div className="space-y-3">
@@ -1657,7 +1758,7 @@ export const Eval = () => {
                                                    <Button size="sm" variant="outline" className="h-6 px-2 text-[10px] gap-1 bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100" onClick={handleManualAdd}>
                                                         <Plus className="w-3 h-3" /> {t({ zh: "新增自定义", en: "Add Custom" })}
                                                    </Button>
-                                                   <Button size="sm" variant="outline" className="h-6 px-2 text-[10px] gap-1 bg-blue-50 border-blue-200 text-blue-700 hover:bg-blue-100" onClick={() => setIsGalleryOpen(true)}>
+                                                   <Button size="sm" variant="outline" className="h-6 px-2 text-[10px] gap-1 bg-blue-50 border-blue-200 text-blue-700 hover:bg-blue-100" onClick={() => { setGallerySelectTarget("edit"); setIsGalleryOpen(true); }}>
                                                         <BookOpen className="w-3 h-3" /> {t({ zh: "从基准库添加", en: "From Gallery" })}
                                                    </Button>
                                                </div>
@@ -2240,11 +2341,17 @@ export const Eval = () => {
                                        };
                                        const score = pickScore(res);
                                        const isRunningBench = b.eval_status === "running";
-                                       const runningThisBench = isRunningBench && evalProgress?.bench_name === b.bench_name;
-                                       const runningPercent = Math.max(0, Math.min(100, Number(evalProgress?.percent ?? 0)));
-                                       const generated = Number(evalProgress?.generated ?? 0);
-                                       const total = Number(evalProgress?.total ?? 0);
-                                       const stage = String(evalProgress?.stage || "generator");
+                                       // 多模型进度：找到匹配当前 bench 的所有进度条目
+                                       const benchProgress = (evalProgress || []).filter(p => p?.bench_name === b.bench_name);
+                                       const runningThisBench = isRunningBench && benchProgress.length > 0;
+                                       // 取所有模型的平均进度，或第一个活跃的进度
+                                       const activeProgress = benchProgress.find(p => p?.stage !== "done") || benchProgress[0];
+                                       const runningPercent = Math.max(0, Math.min(100, Number(activeProgress?.percent ?? 0)));
+                                       const generated = Number(activeProgress?.generated ?? 0);
+                                       const total = Number(activeProgress?.total ?? 0);
+                                       const stage = String(activeProgress?.stage || "generator");
+                                       const completedModels = benchProgress.filter(p => p?.stage === "done").length;
+                                       const totalModels = benchProgress.length;
                                    
                                    return (
                                        <div key={i} className="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden transition-all hover:border-emerald-200">
@@ -2287,7 +2394,7 @@ export const Eval = () => {
                                                                </div>
                                                                <div className="mt-1 text-[10px] text-slate-500 font-mono">
                                                                    {runningThisBench
-                                                                       ? t({ zh: `${stage === "evaluator" ? "评估中" : "生成中"} ${generated}/${total || "?"} (${runningPercent.toFixed(0)}%)`, en: `${stage === "evaluator" ? "Evaluating" : "Generating"} ${generated}/${total || "?"} (${runningPercent.toFixed(0)}%)` })
+                                                                       ? t({ zh: `${stage === "evaluator" ? "评估中" : "生成中"} ${generated}/${total || "?"} (${runningPercent.toFixed(0)}%)${totalModels > 1 ? ` | 模型 ${completedModels}/${totalModels}` : ""}`, en: `${stage === "evaluator" ? "Evaluating" : "Generating"} ${generated}/${total || "?"} (${runningPercent.toFixed(0)}%)${totalModels > 1 ? ` | Model ${completedModels}/${totalModels}` : ""}` })
                                                                        : t({ zh: "准备评测中...", en: "Preparing evaluation..." })}
                                                                </div>
                                                            </div>
@@ -2430,6 +2537,128 @@ export const Eval = () => {
                                                             )}
                                                        </div>
 
+                                                       {/* Eval Results Preview & Download */}
+                                                       {b.eval_status === "success" && (() => {
+                                                           const evalResults = b.meta?.eval_results;
+                                                           if (!evalResults) return null;
+                                                           const modelEntries = Object.entries(evalResults) as [string, { detail_path?: string; stats?: Record<string, any> }][];
+                                                           if (modelEntries.length === 0) return null;
+                                                           return (
+                                                               <div className="col-span-2 space-y-2 mt-2 pt-2 border-t border-slate-50">
+                                                                   <div className="text-[10px] text-slate-400 uppercase font-bold mb-1 flex items-center gap-1">
+                                                                       <FileText className="w-3 h-3" /> {t({ zh: "模型评测结果", en: "Model Results" })}
+                                                                   </div>
+                                                                   {modelEntries.map(([modelName, modelData]) => (
+                                                                       <div key={modelName} className="bg-white rounded-lg border border-slate-100 p-3">
+                                                                           <div className="flex items-center justify-between mb-2">
+                                                                               <span className="text-xs font-bold text-slate-700">{modelName}</span>
+                                                                               <div className="flex items-center gap-2">
+                                                                                   <button
+                                                                                       type="button"
+                                                                                       className="text-[10px] bg-blue-500 hover:bg-blue-600 text-white px-2 py-1 rounded-md font-medium transition-colors flex items-center gap-1"
+                                                                                       onClick={async (e) => {
+                                                                                           e.stopPropagation();
+                                                                                           setPreviewCtx({ bench: b.bench_name, model: modelName });
+                                                                                           setPreviewOpen(true);
+                                                                                           setPreviewLoading(true);
+                                                                                           setPreviewData(null);
+                                                                                           try {
+                                                                                               const res = await fetch(`${apiBaseUrl}/api/eval/preview/${threadId}/${encodeURIComponent(b.bench_name)}/${encodeURIComponent(modelName)}?limit=5`);
+                                                                                               const data = await res.json();
+                                                                                               setPreviewData(data);
+                                                                                           } catch { setPreviewData(null); }
+                                                                                           finally { setPreviewLoading(false); }
+                                                                                       }}
+                                                                                   ><Eye className="w-3 h-3" /> {t({ zh: "预览", en: "Preview" })}</button>
+                                                                                   <button
+                                                                                       type="button"
+                                                                                       className="text-[10px] bg-emerald-500 hover:bg-emerald-600 text-white px-2 py-1 rounded-md font-medium transition-colors flex items-center gap-1"
+                                                                                       disabled={downloading}
+                                                                                       onClick={async (e) => {
+                                                                                           e.stopPropagation();
+                                                                                           setDownloading(true);
+                                                                                           try {
+                                                                                               const res = await fetch(`${apiBaseUrl}/api/eval/result/${threadId}/${encodeURIComponent(b.bench_name)}/${encodeURIComponent(modelName)}`);
+                                                                                               if (!res.ok) return;
+                                                                                               const blob = await res.blob();
+                                                                                               const url = URL.createObjectURL(blob);
+                                                                                               const a = document.createElement("a");
+                                                                                               a.href = url;
+                                                                                               a.download = `${b.bench_name}_${modelName}_results.jsonl`;
+                                                                                               document.body.appendChild(a);
+                                                                                               a.click();
+                                                                                               document.body.removeChild(a);
+                                                                                               URL.revokeObjectURL(url);
+                                                                                           } finally { setDownloading(false); }
+                                                                                       }}
+                                                                                   ><Download className="w-3 h-3" /> {downloading ? t({ zh: "下载中...", en: "Downloading..." }) : t({ zh: "下载", en: "Download" })}</button>
+                                                                               </div>
+                                                                           </div>
+                                                                           {modelData.stats && Object.keys(modelData.stats).length > 0 ? (
+                                                                               <div className="flex flex-wrap gap-2">
+                                                                                   {Object.entries(modelData.stats)
+                                                                                       .filter(([k]) => !["bench_name_or_prefix", "metric", "type"].includes(k))
+                                                                                       .slice(0, 6)
+                                                                                       .map(([k, v]) => (
+                                                                                           <span key={k} className="text-[10px] bg-slate-50 px-2 py-0.5 rounded border border-slate-100">
+                                                                                               <span className="text-slate-400">{k}:</span>{" "}
+                                                                                               <span className="font-mono font-bold text-slate-600">
+                                                                                                   {typeof v === "number" ? (Number.isInteger(v) ? v : v.toFixed(4)) : String(v)}
+                                                                                               </span>
+                                                                                           </span>
+                                                                                       ))}
+                                                                               </div>
+                                                                           ) : (
+                                                                               <span className="text-[10px] text-slate-400 italic">{t({ zh: "仅生成结果（无评估指标）", en: "Generation only (no eval metrics)" })}</span>
+                                                                           )}
+                                                                       </div>
+                                                                   ))}
+                                                               </div>
+                                                           );
+                                                       })()}
+
+                                                       {/* Preview Modal */}
+                                                       <ResultPreviewModal
+                                                           open={previewOpen}
+                                                           onClose={() => setPreviewOpen(false)}
+                                                           previewData={previewData}
+                                                           loading={previewLoading}
+                                                           error={!previewLoading && !previewData}
+                                                           lang={lang}
+                                                           onDownload={async (format) => {
+                                                               if (!previewCtx) return;
+                                                               setDownloading(true);
+                                                               try {
+                                                                   const ext = format;
+                                                                   const endpoint = format === "jsonl"
+                                                                       ? `${apiBaseUrl}/api/eval/result/${threadId}/${encodeURIComponent(previewCtx.bench)}/${encodeURIComponent(previewCtx.model)}`
+                                                                       : `${apiBaseUrl}/api/eval/result/${format}/${threadId}/${encodeURIComponent(previewCtx.bench)}/${encodeURIComponent(previewCtx.model)}`;
+                                                                   const res = await fetch(endpoint);
+                                                                   if (!res.ok) return;
+                                                                   const blob = await res.blob();
+                                                                   const url = URL.createObjectURL(blob);
+                                                                   const a = document.createElement("a");
+                                                                   a.href = url;
+                                                                   a.download = `${previewCtx.bench}_${previewCtx.model}_results.${ext}`;
+                                                                   document.body.appendChild(a);
+                                                                   a.click();
+                                                                   document.body.removeChild(a);
+                                                                   URL.revokeObjectURL(url);
+                                                               } finally { setDownloading(false); }
+                                                           }}
+                                                           downloading={downloading}
+                                                           fetchingAll={fetchingAll}
+                                                           onFetchAll={async () => {
+                                                               if (!previewCtx) throw new Error();
+                                                               setFetchingAll(true);
+                                                               try {
+                                                                   const res = await fetch(`${apiBaseUrl}/api/eval/preview/${threadId}/${encodeURIComponent(previewCtx.bench)}/${encodeURIComponent(previewCtx.model)}?limit=99999`);
+                                                                   if (!res.ok) throw new Error();
+                                                                   return await res.json();
+                                                               } finally { setFetchingAll(false); }
+                                                           }}
+                                                       />
+
                                                        {/* Recommended Metrics Section
                                                        {(state.metric_plan && state.metric_plan[b.bench_name]) && (
                                                            <div className="col-span-2 space-y-2 mt-2 pt-2 border-t border-slate-50">
@@ -2527,9 +2756,10 @@ export const Eval = () => {
            </main>
            
            {/* Bottom Summary Panel */}
-           <SummaryPanel 
-                state={state} 
-                sidebarWidth={showHistory ? 240 : 60} 
+           <SummaryPanel
+                state={state}
+                threadId={threadId}
+                sidebarWidth={showHistory ? 240 : 60}
                 chatWidth={chatWidth}
                 lang={lang}
            />
@@ -2555,10 +2785,10 @@ export const Eval = () => {
        </div>
 
        {/* Gallery Modal */}
-       <GalleryModal 
-            isOpen={isGalleryOpen} 
-            onClose={() => setIsGalleryOpen(false)} 
-            onSelect={handleGallerySelect}
+       <GalleryModal
+            isOpen={isGalleryOpen}
+            onClose={() => setIsGalleryOpen(false)}
+            onSelect={gallerySelectTarget === "manual" ? handleManualGallerySelect : handleGallerySelect}
             apiBaseUrl={apiBaseUrl}
             lang={lang}
        />

@@ -25,6 +25,12 @@ class BenchSearchNode(BaseNode):
         self.use_rag = use_rag
 
     async def run(self, state: NodeState) -> NodeState:
+        # 检查是否已经存在benches（手动选择模式）
+        benches = getattr(state, "benches", [])
+        if benches:
+            log.info(f"[{self.name}] 已存在 {len(benches)} 个手动选择的benches，跳过基准搜索")
+            return state
+
         # 1) 通过 BenchNameSuggestNode 检索 benchmark（不调用 LLM）
         suggest_node = BenchNameSuggestNode(use_rag=self.use_rag)
         state = await suggest_node.run(state)

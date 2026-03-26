@@ -198,5 +198,15 @@ class GraphBuilder(GenericGraphBuilder):
             sg.add_conditional_edges(src, cond_func)
             
         sg.set_entry_point(self.entry_point)
-        return sg.compile(checkpointer=checkpointer, **kwargs)
+        # Register custom dataclass types for checkpoint serialization
+        compile_kwargs = dict(kwargs)
+        # Remove allowed_msgpack_modules as it's not a valid parameter for StateGraph.compile()
+        # in LangGraph 1.1.3. Custom serialization should be configured differently if needed.
+        compile_kwargs.pop("allowed_msgpack_modules", None)
+
+        # Note: Custom type serialization warnings are not critical
+        # The main concurrent update issue has been fixed by adding Annotated annotations
+        # Deserialization warnings will not prevent the graph from functioning
+
+        return sg.compile(checkpointer=checkpointer, **compile_kwargs)
         

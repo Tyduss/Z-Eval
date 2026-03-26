@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+import operator
 import time
 import copy
 import uuid
@@ -22,10 +23,10 @@ class MainRequest:
 
 @dataclass
 class MainState:
-    request: MainRequest = field(default_factory=MainRequest)
+    request: Annotated[MainRequest, lambda x, y: y] = field(default_factory=MainRequest)
     messages: Annotated[List[BaseMessage], add_messages] = field(default_factory=list)
-    agent_results: Dict[str, Any] = field(default_factory=dict)
-    temp_data: Dict[str, Any] = field(default_factory=dict)
+    agent_results: Annotated[Dict[str, Any], lambda x, y: {**x, **y}] = field(default_factory=dict)
+    temp_data: Annotated[Dict[str, Any], lambda x, y: {**x, **y}] = field(default_factory=dict)
 
     def get(self, key, default=None):
         return getattr(self, key, default)
@@ -75,47 +76,47 @@ class NodeState(MainState):
     """Global state container for One-Eval graph execution."""
 
     # === 基本元信息 ===
-    state_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    current_node: Optional[str] = None
-    last_updated: float = field(default_factory=time.time)
+    state_id: Annotated[str, lambda x, y: y] = field(default_factory=lambda: str(uuid.uuid4()))
+    current_node: Annotated[Optional[str], lambda x, y: y if y else x] = None
+    last_updated: Annotated[float, lambda x, y: y] = field(default_factory=time.time)
 
     # === 用户输入 / 任务上下文 ===
-    user_query: Optional[str] = None               # e.g. "评估模型在文本过滤任务的表现"
-    task_domain: Optional[str] = None              # "text", "vision", "math" 等
-    target_model_name: Optional[str] = None        # 被测模型名（兼容单模型）
-    use_rag: bool = True                           # 是否使用 RAG 进行 benchmark 推荐
-    local_count: int = 3                           # 本地检索配额（gallery / TF-IDF / RAG）
-    hf_count: int = 2                              # HF 在线搜索配额
-    model_type: Optional[str] = None              # "Qwen", "Llama", "DeepSeek"
-    target_model: Optional[ModelConfig] = None    # 单模型配置（兼容）
-    target_models: List[ModelConfig] = field(default_factory=list)  # 多模型配置
+    user_query: Annotated[Optional[str], lambda x, y: y if y else x] = None
+    task_domain: Annotated[Optional[str], lambda x, y: y if y else x] = None
+    target_model_name: Annotated[Optional[str], lambda x, y: y if y else x] = None
+    use_rag: Annotated[bool, operator.or_] = True                             # 是否使用 RAG 进行 benchmark 推荐
+    local_count: Annotated[int, lambda x, y: y] = 3
+    hf_count: Annotated[int, lambda x, y: y] = 2
+    model_type: Annotated[Optional[str], lambda x, y: y if y else x] = None
+    target_model: Annotated[Optional[ModelConfig], lambda x, y: y if y else x] = None
+    target_models: Annotated[List[ModelConfig], lambda x, y: y] = field(default_factory=list)
     # temp: Dict[str, Any] = field(default_factory=dict)  # 临时存储，用于中间结果
-    reference_model: Optional[ModelConfig] = None # 预留semantic评估接口
+    reference_model: Annotated[Optional[ModelConfig], lambda x, y: y if y else x] = None
 
-    result: Optional[Dict[str, Any]] = field(default_factory=dict) # 某个agent的输出结果
+    result: Annotated[Dict[str, Any], lambda x, y: {**x, **y}] = field(default_factory=dict) # 某个agent的输出结果
 
     # === 数据与评测基准 ===
-    benches: List[BenchInfo] = field(default_factory=list)
+    benches: Annotated[List[BenchInfo], lambda x, y: y] = field(default_factory=list)
 
-    eval_cursor: int = 0
+    eval_cursor: Annotated[int, lambda x, y: y] = 0
 
     # === 评测规划与结果 ===
-    key_plan: Dict[str, Any] = field(default_factory=dict)   # 输入输出字段映射
-    metric_plan: Dict[str, Any] = field(default_factory=dict)
-    eval_results: Dict[str, Any] = field(default_factory=dict)
-    reports: Dict[str, Any] = field(default_factory=dict)
+    key_plan: Annotated[Dict[str, Any], lambda x, y: {**x, **y}] = field(default_factory=dict)   # 输入输出字段映射
+    metric_plan: Annotated[Dict[str, Any], lambda x, y: {**x, **y}] = field(default_factory=dict)
+    eval_results: Annotated[Dict[str, Any], lambda x, y: {**x, **y}] = field(default_factory=dict)
+    reports: Annotated[Dict[str, Any], lambda x, y: {**x, **y}] = field(default_factory=dict)
 
     # === LLM交互历史 === #
-    llm_history: List[Dict[str, Any]] = field(default_factory=list)
+    llm_history: Annotated[List[Dict[str, Any]], lambda x, y: x + y] = field(default_factory=list)
 
     # === 人机交互控制 ===
-    waiting_for_human: bool = False
-    human_feedback: Optional[str] = None
-    approved_warning_ids: List[str] = field(default_factory=list) # validator 白名单
+    waiting_for_human: Annotated[bool, operator.or_] = False
+    human_feedback: Annotated[Optional[str], lambda x, y: y if y else x] = None
+    approved_warning_ids: Annotated[List[str], operator.add] = field(default_factory=list) # validator 白名单
     
     # === 异常与日志 ===
-    error_flag: bool = False
-    error_msg: Optional[str] = None
+    error_flag: Annotated[bool, operator.or_] = False
+    error_msg: Annotated[Optional[str], lambda x, y: y if y else x] = None
 
     def update(self, **fields: Any) -> None:
         """Update multiple attributes in one call and refresh timestamp."""

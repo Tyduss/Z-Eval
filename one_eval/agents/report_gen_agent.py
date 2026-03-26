@@ -99,60 +99,118 @@ class ReportGenAgent(CustomAgent):
         eval_results: Dict[str, Any] = getattr(state, "eval_results", {}) or {}
         metric_plan: Dict[str, Any] = getattr(state, "metric_plan", {}) or {}
 
-        if not benches or not eval_results:
-            log.warning("缺少 benches 或 eval_results，跳过报告生成")
+        if not benches:
+            log.warning("缺少 benches，跳过报告生成")
             return state
 
-        bench_summaries = self._build_bench_summaries(benches, eval_results, metric_plan)
-        overall_score = self._compute_overall_score(bench_summaries)
+        # 检测是否为无参考答案模式（仅生成模式）
+        is_generation_only = not eval_results
 
-        lang = self._get_lang(state)
-        macro_view = self._build_macro_view(bench_summaries, eval_results, lang)
-        diagnostic_view = self._build_diagnostic_view(benches, eval_results, metric_plan, lang)
-        analyst_view = self._collect_analyst_outputs(benches, eval_results)
-        analyst_compact = self._compact_analyst_view(analyst_view)
+        if is_generation_only:
+            report = self._build_generation_only_report(state, benches)
+        else:
+            bench_summaries = self._build_bench_summaries(benches, eval_results, metric_plan)
+            overall_score = self._compute_overall_score(bench_summaries)
 
-        summary_payload = {
-            "overall_score": overall_score,
-            "benches": bench_summaries[:20],
-            "error_distribution": diagnostic_view.get("error_distribution", []),
-            "metric_summaries": analyst_compact.get("metric_summary", []),
-            "case_studies": analyst_compact.get("case_study", []),
-        }
-        llm_summary = await self._generate_llm_summary(summary_payload, state)
+            lang = self._get_lang(state)
+            macro_view = self._build_macro_view(bench_summaries, eval_results, lang)
+            diagnostic_view = self._build_diagnostic_view(benches, eval_results, metric_plan, lang)
+            analyst_view = self._collect_analyst_outputs(benches, eval_results)
+            analyst_compact = self._compact_analyst_view(analyst_view)
 
-        report = {
-            "version": "v1",
-            "generated_at": time.time(),
-            "model": self._get_model_name(state),
-            "overall": {
-                "score": overall_score,
-                "bench_summaries": bench_summaries,
-            },
-            "macro": macro_view,
-            "diagnostic": {
+            summary_payload = {
+                "overall_score": overall_score,
+                "benches": bench_summaries[:20],
                 "error_distribution": diagnostic_view.get("error_distribution", []),
-                "length_histogram": diagnostic_view.get("length_histogram", {}),
-            },
-            "cases": {
-                "columns": ["bench", "question", "model_output", "ground_truth", "error_type", "score"],
-                "rows": diagnostic_view.get("cases", []),
-            },
-            "analyst": analyst_view,
-            "llm_summary": llm_summary,
-        }
+                "metric_summaries": analyst_compact.get("metric_summary", []),
+                "case_studies": analyst_compact.get("case_study", []),
+            }
+            llm_summary = await self._generate_llm_summary(summary_payload, state)
+
+            report = {
+                "version": "v1",
+                "generated_at": time.time(),
+                "model": self._get_model_name(state),
+                "overall": {
+                    "score": overall_score,
+                    "bench_summaries": bench_summaries,
+                },
+                "macro": macro_view,
+                "diagnostic": {
+                    "error_distribution": diagnostic_view.get("error_distribution", []),
+                    "length_histogram": diagnostic_view.get("length_histogram", {}),
+                },
+                "cases": {
+                    "columns": ["bench", "question", "model_output", "ground_truth", "error_type", "score"],
+                    "rows": diagnostic_view.get("cases", []),
+                },
+                "analyst": analyst_view,
+                "llm_summary": llm_summary,
+            }
 
         if not getattr(state, "reports", None):
             state.reports = {}
         state.reports["default"] = report
 
-        log.info(f"[ReportGen] report={json.dumps(report, ensure_ascii=False)}")
+        log.info(f"[ReportGen] report={json.dumps(report, ensure_ascii=False, default=str)}")
 
         if not getattr(state, "result", None):
             state.result = {}
         state.result[self.role_name] = {"report_key": "default"}
 
         return state
+
+    def _build_generation_only_report(self, state: NodeState, benches: List[BenchInfo]) -> Dict[str, Any]:
+        """为无参考答案的纯生成模式构建报告"""
+        model_name = self._get_model_name(state)
+        bench_summaries = []
+
+        for bench in benches:
+            meta = bench.meta or {}
+            eval_results_meta = meta.get("eval_results", {})
+
+            for m_name, m_result in eval_results_meta.items():
+                bench_summaries.append({
+                    "bench": bench.bench_name,
+                    "model": m_name,
+                    "eval_type": bench.bench_dataflow_eval_type or "unknown",
+                    "primary_metric": None,
+                    "primary_score": None,
+                    "detail_path": m_result.get("detail_path"),
+                })
+
+            if not eval_results_meta and meta.get("eval_detail_path"):
+                bench_summaries.append({
+                    "bench": bench.bench_name,
+                    "model": model_name,
+                    "eval_type": bench.bench_dataflow_eval_type or "unknown",
+                    "primary_metric": None,
+                    "primary_score": None,
+                    "detail_path": meta.get("eval_detail_path"),
+                })
+
+        lang = self._get_lang(state)
+        summary_text = (
+            f"模型 {model_name} 在 {len(benches)} 个评测集上完成了生成任务（无参考答案模式）。"
+            if not str(lang).lower().startswith("en")
+            else f"Model {model_name} completed generation tasks on {len(benches)} benchmark(s) (no-reference mode)."
+        )
+
+        return {
+            "version": "v1",
+            "generated_at": time.time(),
+            "model": model_name,
+            "mode": "generation_only",
+            "overall": {
+                "score": None,
+                "bench_summaries": bench_summaries,
+            },
+            "macro": {"radar": {"labels": [], "scores": []}, "sunburst": {"rows": []}, "table": []},
+            "diagnostic": {"error_distribution": [], "length_histogram": {"bins": [0], "correct": [0], "incorrect": [0]}},
+            "cases": {"columns": [], "rows": []},
+            "analyst": {"metric_summary": {}, "case_study": {}},
+            "llm_summary": summary_text,
+        }
 
     def _get_model_name(self, state: NodeState) -> str:
         if getattr(state, "target_model_name", None):
