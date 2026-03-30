@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, type ReactNode, type MouseEvent } from "react";
+import { useState, useEffect, useMemo, useCallback, type ReactNode, type MouseEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
 import { motion } from "framer-motion";
@@ -12,6 +12,7 @@ import { ChatPanel, WorkflowBlock, SummaryPanel, Bench, WorkflowState, BenchCard
 import { SimpleMarkdown } from "@/components/ui/simple-markdown";
 import { ResultPreviewModal } from "@/components/ui/result-preview-modal";
 import { useLang } from "@/lib/i18n";
+import JudgeResultPanel from "@/components/judge/JudgeResultPanel";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 // --- Types ---
@@ -104,6 +105,7 @@ export const Eval = () => {
       top_k: -1,
       repetition_penalty: 1.0,
       max_tokens: 2048,
+      api_concurrency: 16,
       tensor_parallel_size: 1,
       max_model_len: 32768,
       gpu_memory_utilization: 0.9,
@@ -187,6 +189,165 @@ export const Eval = () => {
 
   const apiBaseUrl = useMemo(() => localStorage.getItem("oneEval.apiBaseUrl") || "http://localhost:8000", []);
   const draftKey = useMemo(() => "oneEval.evalDraft", []);
+
+  // --- Judge Tab state (managed in Eval.tsx, consumed by SummaryPanel Tab 3) ---
+  const [judgeTabState, setJudgeTabState] = useState<{
+    judgeBench: any;
+    judgeModels: { model_name: string; detail_path: string }[];
+    judgeTaskId: string | null;
+    judgeStatus: 'idle' | 'running' | 'completed' | 'failed' | null;
+    judgeHistory: any[];
+    judgeReport: any;
+    judgeReportStatus: 'idle' | 'generating' | 'done' | 'error';
+  }>({
+    judgeBench: null,
+    judgeModels: [],
+    judgeTaskId: null,
+    judgeStatus: null,
+    judgeHistory: [],
+    judgeReport: null,
+    judgeReportStatus: 'idle',
+  });
+
+  // Result modal state (separate from tab state)
+  const [showJudgeResultModal, setShowJudgeResultModal] = useState(false);
+
+  // SummaryPanel fullscreen state
+  const [summaryFullscreen, setSummaryFullscreen] = useState(false);
+
+  // Try to restore a previously generated judge report from backend
+  const tryRestoreJudgeReport = useCallback((taskId: string) => {
+    fetch(`${apiBaseUrl}/api/judge/report/${taskId}`)
+      .then(r => { if (!r.ok) throw new Error(); return r.json(); })
+      .then(report => {
+        setJudgeTabState(prev => ({
+          ...prev,
+          judgeReport: report,
+          judgeReportStatus: 'done',
+        }));
+      })
+      .catch(() => {});
+  }, [apiBaseUrl]);
+
+  // Load judge history for current thread on mount / thread change
+  useEffect(() => {
+    if (!threadId) return;
+    fetch(`${apiBaseUrl}/api/judge/by-thread/${threadId}`)
+      .then(r => r.json())
+      .then((tasks: any[]) => {
+        setJudgeTabState(prev => ({ ...prev, judgeHistory: tasks }));
+        // Auto-load latest completed task
+        const latest = tasks.filter(t => t.status === 'completed').pop();
+        if (latest) {
+          setJudgeTabState(prev => ({
+            ...prev,
+            judgeTaskId: latest.task_id,
+            judgeStatus: 'completed',
+            judgeBench: { bench_name: latest.bench_name },
+            judgeModels: (latest.model_names || []).map((n: string) => ({ model_name: n, detail_path: '' })),
+          }));
+          tryRestoreJudgeReport(latest.task_id);
+        }
+      })
+      .catch(() => {});
+  }, [threadId, apiBaseUrl, tryRestoreJudgeReport]);
+
+  const handleJudgeAction = useCallback(async (action: string, payload?: any) => {
+    if (action === "start") {
+      const config = payload;
+      // Collect models + paths from current state
+      const evalResults: Record<string, string> = {};
+      state?.benches?.forEach((b: any) => {
+        const er = b.meta?.eval_results || {};
+        for (const [name, info] of Object.entries(er)) {
+          const path = (info as any)?.detail_path;
+          if (path) evalResults[name] = path;
+        }
+      });
+
+      try {
+        const body = {
+          bench_name: state?.benches?.[0]?.bench_name || 'unknown',
+          thread_id: threadId,
+          model_names: config.selectedModels,
+          model_data_paths: Object.fromEntries(
+            config.selectedModels.map((name: string) => [name, evalResults[name] || ''])
+          ),
+          scoring_prompt: config.scoringPrompt,
+          judge_model: config.judgeModel,
+          concurrency: config.concurrency,
+        };
+        const res = await fetch(`${apiBaseUrl}/api/judge/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (data.task_id) {
+          setJudgeTabState(prev => ({
+            ...prev,
+            judgeTaskId: data.task_id,
+            judgeStatus: 'running',
+          }));
+        }
+      } catch (e) {
+        console.error('Failed to start judge:', e);
+      }
+    }
+
+    if (action === "complete") {
+      setJudgeTabState(prev => ({
+        ...prev,
+        judgeStatus: 'completed',
+        judgeReportStatus: 'idle',
+        judgeReport: null,
+      }));
+    }
+
+    if (action === "reset") {
+      setJudgeTabState(prev => ({
+        ...prev,
+        judgeTaskId: null,
+        judgeStatus: null,
+        judgeReport: null,
+        judgeReportStatus: 'idle',
+      }));
+    }
+
+    if (action === "loadHistory") {
+      const h = payload;
+      setJudgeTabState(prev => ({
+        ...prev,
+        judgeTaskId: h.task_id,
+        judgeStatus: h.status === 'completed' ? 'completed' : h.status === 'failed' ? 'failed' : null,
+        judgeBench: { bench_name: h.bench_name },
+        judgeModels: (h.model_names || []).map((n: string) => ({ model_name: n, detail_path: '' })),
+        judgeReport: null,
+        judgeReportStatus: 'idle',
+      }));
+      if (h.status === 'completed') {
+        tryRestoreJudgeReport(h.task_id);
+      }
+    }
+
+    if (action === "generateReport") {
+      const taskId = judgeTabState.judgeTaskId;
+      if (!taskId) return;
+      setJudgeTabState(prev => ({ ...prev, judgeReportStatus: 'generating' }));
+      try {
+        const res = await fetch(`${apiBaseUrl}/api/judge/report/${taskId}`, { method: 'POST' });
+        const report = await res.json();
+        setJudgeTabState(prev => ({
+          ...prev,
+          judgeReport: report,
+          judgeReportStatus: 'done',
+        }));
+      } catch (e) {
+        console.error('Failed to generate report:', e);
+        setJudgeTabState(prev => ({ ...prev, judgeReportStatus: 'error' }));
+      }
+    }
+  }, [apiBaseUrl, threadId, state, judgeTabState.judgeTaskId]);
 
   useEffect(() => {
       localStorage.setItem("oneEval.workMode", workMode);
@@ -625,7 +786,8 @@ export const Eval = () => {
                     tensor_parallel_size: evalParams.tensor_parallel_size,
                     max_model_len: evalParams.max_model_len,
                     gpu_memory_utilization: evalParams.gpu_memory_utilization,
-                    seed: evalParams.seed
+                    seed: evalParams.seed,
+                    api_concurrency: evalParams.api_concurrency,
                 }
               : null;
           const shouldSendBenches = Boolean(
@@ -901,14 +1063,15 @@ export const Eval = () => {
           ? { 
                 ...nextModel, 
                 temperature: evalParams.temperature, 
-                top_p: evalParams.top_p, 
+                top_p: evalParams.top_p,
                 top_k: evalParams.top_k,
                 repetition_penalty: evalParams.repetition_penalty,
                 max_tokens: evalParams.max_tokens,
                 tensor_parallel_size: evalParams.tensor_parallel_size,
                 max_model_len: evalParams.max_model_len,
                 gpu_memory_utilization: evalParams.gpu_memory_utilization,
-                seed: evalParams.seed
+                seed: evalParams.seed,
+                api_concurrency: evalParams.api_concurrency,
             }
           : null;
       const stateUpdates: any = {
@@ -965,7 +1128,8 @@ export const Eval = () => {
               tensor_parallel_size: evalParams.tensor_parallel_size,
               max_model_len: evalParams.max_model_len,
               gpu_memory_utilization: evalParams.gpu_memory_utilization,
-              seed: evalParams.seed
+              seed: evalParams.seed,
+              api_concurrency: evalParams.api_concurrency,
           }));
       } else {
           // Single model mode (backward compatible)
@@ -983,7 +1147,8 @@ export const Eval = () => {
               tensor_parallel_size: evalParams.tensor_parallel_size,
               max_model_len: evalParams.max_model_len,
               gpu_memory_utilization: evalParams.gpu_memory_utilization,
-              seed: evalParams.seed
+              seed: evalParams.seed,
+              api_concurrency: evalParams.api_concurrency,
           }];
       }
 
@@ -1396,10 +1561,10 @@ export const Eval = () => {
                        </div>
 
                        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 space-y-4">
-                           <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Generation</div>
+                           <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Generation（生成参数）</div>
                            <div className="grid grid-cols-12 gap-x-4 gap-y-4">
                                <div className="col-span-3 min-w-0">
-                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Temperature</label>
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Temperature（温度）</label>
                                    <Input
                                        type="number"
                                        step="0.1"
@@ -1412,7 +1577,7 @@ export const Eval = () => {
                                    />
                                </div>
                                <div className="col-span-3 min-w-0">
-                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Top P</label>
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Top P（核采样）</label>
                                    <Input
                                        type="number"
                                        step="0.05"
@@ -1425,7 +1590,7 @@ export const Eval = () => {
                                    />
                                </div>
                                <div className="col-span-3 min-w-0">
-                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Top K</label>
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Top K（候选数）</label>
                                    <Input
                                        type="number"
                                        step="1"
@@ -1436,7 +1601,7 @@ export const Eval = () => {
                                    />
                                </div>
                                <div className="col-span-3 min-w-0">
-                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Repetition</label>
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Repetition（重复惩罚）</label>
                                    <Input
                                        type="number"
                                        step="0.05"
@@ -1449,8 +1614,8 @@ export const Eval = () => {
                                    />
                                </div>
 
-                               <div className="col-span-4 min-w-0">
-                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Max Tokens</label>
+                               <div className="col-span-3 min-w-0">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Max Tokens（最大生成长度）</label>
                                    <Input
                                        type="number"
                                        step="128"
@@ -1460,8 +1625,21 @@ export const Eval = () => {
                                        className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
                                    />
                                </div>
-                               <div className="col-span-4 min-w-0">
-                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Tensor Parallel</label>
+                               <div className="col-span-3 min-w-0">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">API Concurrency（API并发数）</label>
+                                   <Input
+                                       type="number"
+                                       step="1"
+                                       min="1"
+                                       max="128"
+                                       value={evalParams.api_concurrency}
+                                       onChange={e => setEvalParams({ ...evalParams, api_concurrency: parseInt(e.target.value) || 1 })}
+                                       disabled={status === "running"}
+                                       className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                   />
+                               </div>
+                               <div className="col-span-3 min-w-0">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Tensor Parallel（张量并行）</label>
                                    <Input
                                        type="number"
                                        step="1"
@@ -1472,8 +1650,8 @@ export const Eval = () => {
                                        className="h-9 bg-white border-slate-200 rounded-lg text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
                                    />
                                </div>
-                               <div className="col-span-4 min-w-0">
-                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">GPU Mem Util</label>
+                               <div className="col-span-3 min-w-0">
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">GPU Mem Util（显存占用）</label>
                                    <Input
                                        type="number"
                                        step="0.05"
@@ -1486,7 +1664,7 @@ export const Eval = () => {
                                    />
                                </div>
                                <div className="col-span-6 min-w-0">
-                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Max Model Len</label>
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Max Model Len（最大模型长度）</label>
                                    <Input
                                        type="number"
                                        step="1024"
@@ -1497,7 +1675,7 @@ export const Eval = () => {
                                    />
                                </div>
                                <div className="col-span-6 min-w-0">
-                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Seed</label>
+                                   <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Seed（随机种子）</label>
                                    <Input
                                        type="number"
                                        step="1"
@@ -2067,39 +2245,39 @@ export const Eval = () => {
                                    </div>
                                    
                                    <div className="col-span-3 min-w-0">
-                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Temperature</label>
-                                       <Input 
-                                           type="number" 
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Temperature（温度）</label>
+                                       <Input
+                                           type="number"
                                            step="0.1"
                                            min="0"
                                            max="2"
-                                           value={evalParams.temperature} 
+                                           value={evalParams.temperature}
                                            onChange={e => setEvalParams({...evalParams, temperature: parseFloat(e.target.value) || 0})}
                                            disabled={status === "running"}
                                            className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
                                        />
                                    </div>
-                                   
+
                                    <div className="col-span-3 min-w-0">
-                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Top P</label>
-                                       <Input 
-                                           type="number" 
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Top P（核采样）</label>
+                                       <Input
+                                           type="number"
                                            step="0.05"
                                            min="0"
                                            max="1"
-                                           value={evalParams.top_p} 
+                                           value={evalParams.top_p}
                                            onChange={e => setEvalParams({...evalParams, top_p: parseFloat(e.target.value) || 0})}
                                            disabled={status === "running"}
                                            className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
                                        />
                                    </div>
-                                   
+
                                    <div className="col-span-3 min-w-0">
-                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Top K</label>
-                                       <Input 
-                                           type="number" 
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Top K（候选数）</label>
+                                       <Input
+                                           type="number"
                                            step="1"
-                                           value={evalParams.top_k} 
+                                           value={evalParams.top_k}
                                            onChange={e => setEvalParams({...evalParams, top_k: parseInt(e.target.value) || 0})}
                                            disabled={status === "running"}
                                            className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
@@ -2107,52 +2285,66 @@ export const Eval = () => {
                                    </div>
 
                                    <div className="col-span-3 min-w-0">
-                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Repetition</label>
-                                       <Input 
-                                           type="number" 
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Repetition（重复惩罚）</label>
+                                       <Input
+                                           type="number"
                                            step="0.05"
                                            min="0.5"
                                            max="2"
-                                           value={evalParams.repetition_penalty} 
+                                           value={evalParams.repetition_penalty}
                                            onChange={e => setEvalParams({...evalParams, repetition_penalty: parseFloat(e.target.value) || 1})}
                                            disabled={status === "running"}
                                            className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
                                        />
                                    </div>
 
-                                   <div className="col-span-4 min-w-0">
-                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Max Tokens</label>
-                                       <Input 
-                                           type="number" 
+                                   <div className="col-span-3 min-w-0">
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Max Tokens（最大生成长度）</label>
+                                       <Input
+                                           type="number"
                                            step="128"
-                                           value={evalParams.max_tokens} 
+                                           value={evalParams.max_tokens}
                                            onChange={e => setEvalParams({...evalParams, max_tokens: parseInt(e.target.value) || 0})}
                                            disabled={status === "running"}
                                            className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
                                        />
                                    </div>
 
-                                   <div className="col-span-4 min-w-0">
-                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Tensor Parallel</label>
-                                       <Input 
-                                           type="number" 
+                                   <div className="col-span-3 min-w-0">
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">API Concurrency（API并发数）</label>
+                                       <Input
+                                           type="number"
                                            step="1"
                                            min="1"
-                                           value={evalParams.tensor_parallel_size} 
+                                           max="128"
+                                           value={evalParams.api_concurrency}
+                                           onChange={e => setEvalParams({...evalParams, api_concurrency: parseInt(e.target.value) || 1})}
+                                           disabled={status === "running"}
+                                           className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
+                                       />
+                                   </div>
+
+                                   <div className="col-span-3 min-w-0">
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Tensor Parallel（张量并行）</label>
+                                       <Input
+                                           type="number"
+                                           step="1"
+                                           min="1"
+                                           value={evalParams.tensor_parallel_size}
                                            onChange={e => setEvalParams({...evalParams, tensor_parallel_size: parseInt(e.target.value) || 1})}
                                            disabled={status === "running"}
                                            className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
                                        />
                                    </div>
 
-                                   <div className="col-span-4 min-w-0">
-                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">GPU Mem Util</label>
-                                       <Input 
-                                           type="number" 
+                                   <div className="col-span-3 min-w-0">
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">GPU Mem Util（显存占用）</label>
+                                       <Input
+                                           type="number"
                                            step="0.05"
                                            min="0.1"
                                            max="1"
-                                           value={evalParams.gpu_memory_utilization} 
+                                           value={evalParams.gpu_memory_utilization}
                                            onChange={e => setEvalParams({...evalParams, gpu_memory_utilization: parseFloat(e.target.value) || 0.9})}
                                            disabled={status === "running"}
                                            className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
@@ -2160,11 +2352,11 @@ export const Eval = () => {
                                    </div>
 
                                    <div className="col-span-6 min-w-0">
-                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Max Model Len</label>
-                                       <Input 
-                                           type="number" 
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Max Model Len（最大模型长度）</label>
+                                       <Input
+                                           type="number"
                                            step="1024"
-                                           value={evalParams.max_model_len} 
+                                           value={evalParams.max_model_len}
                                            onChange={e => setEvalParams({...evalParams, max_model_len: parseInt(e.target.value) || 0})}
                                            disabled={status === "running"}
                                            className="h-9 bg-white border-emerald-200 rounded-lg focus-visible:ring-emerald-500/20 focus-visible:border-emerald-500 text-xs font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-50/50"
@@ -2172,9 +2364,9 @@ export const Eval = () => {
                                    </div>
 
                                    <div className="col-span-6 min-w-0">
-                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Seed</label>
-                                       <Input 
-                                           type="number" 
+                                       <label className="text-[10px] uppercase font-bold text-slate-400 mb-1.5 block px-1">Seed（随机种子）</label>
+                                       <Input
+                                           type="number"
                                            step="1"
                                            value={evalParams.seed} 
                                            onChange={e => setEvalParams({...evalParams, seed: parseInt(e.target.value) || 0})}
@@ -2617,48 +2809,6 @@ export const Eval = () => {
                                                            );
                                                        })()}
 
-                                                       {/* Preview Modal */}
-                                                       <ResultPreviewModal
-                                                           open={previewOpen}
-                                                           onClose={() => setPreviewOpen(false)}
-                                                           previewData={previewData}
-                                                           loading={previewLoading}
-                                                           error={!previewLoading && !previewData}
-                                                           lang={lang}
-                                                           onDownload={async (format) => {
-                                                               if (!previewCtx) return;
-                                                               setDownloading(true);
-                                                               try {
-                                                                   const ext = format;
-                                                                   const endpoint = format === "jsonl"
-                                                                       ? `${apiBaseUrl}/api/eval/result/${threadId}/${encodeURIComponent(previewCtx.bench)}/${encodeURIComponent(previewCtx.model)}`
-                                                                       : `${apiBaseUrl}/api/eval/result/${format}/${threadId}/${encodeURIComponent(previewCtx.bench)}/${encodeURIComponent(previewCtx.model)}`;
-                                                                   const res = await fetch(endpoint);
-                                                                   if (!res.ok) return;
-                                                                   const blob = await res.blob();
-                                                                   const url = URL.createObjectURL(blob);
-                                                                   const a = document.createElement("a");
-                                                                   a.href = url;
-                                                                   a.download = `${previewCtx.bench}_${previewCtx.model}_results.${ext}`;
-                                                                   document.body.appendChild(a);
-                                                                   a.click();
-                                                                   document.body.removeChild(a);
-                                                                   URL.revokeObjectURL(url);
-                                                               } finally { setDownloading(false); }
-                                                           }}
-                                                           downloading={downloading}
-                                                           fetchingAll={fetchingAll}
-                                                           onFetchAll={async () => {
-                                                               if (!previewCtx) throw new Error();
-                                                               setFetchingAll(true);
-                                                               try {
-                                                                   const res = await fetch(`${apiBaseUrl}/api/eval/preview/${threadId}/${encodeURIComponent(previewCtx.bench)}/${encodeURIComponent(previewCtx.model)}?limit=99999`);
-                                                                   if (!res.ok) throw new Error();
-                                                                   return await res.json();
-                                                               } finally { setFetchingAll(false); }
-                                                           }}
-                                                       />
-
                                                        {/* Recommended Metrics Section
                                                        {(state.metric_plan && state.metric_plan[b.bench_name]) && (
                                                            <div className="col-span-2 space-y-2 mt-2 pt-2 border-t border-slate-50">
@@ -2762,6 +2912,39 @@ export const Eval = () => {
                 sidebarWidth={showHistory ? 240 : 60}
                 chatWidth={chatWidth}
                 lang={lang}
+                apiBaseUrl={apiBaseUrl}
+                judgeTabState={judgeTabState}
+                onJudgeAction={handleJudgeAction}
+                onViewJudgeResult={() => setShowJudgeResultModal(true)}
+                isFullscreen={summaryFullscreen}
+                onFullscreenChange={setSummaryFullscreen}
+                onPreviewModel={(bench, model) => {
+                    setPreviewCtx({ bench, model });
+                    setPreviewOpen(true);
+                    setPreviewLoading(true);
+                    setPreviewData(null);
+                    fetch(`${apiBaseUrl}/api/eval/preview/${threadId}/${encodeURIComponent(bench)}/${encodeURIComponent(model)}?limit=5`)
+                        .then(res => res.json())
+                        .then(data => setPreviewData(data))
+                        .catch(() => setPreviewData(null))
+                        .finally(() => setPreviewLoading(false));
+                }}
+                onDownloadModel={async (bench, model) => {
+                    setDownloading(true);
+                    try {
+                        const res = await fetch(`${apiBaseUrl}/api/eval/result/${threadId}/${encodeURIComponent(bench)}/${encodeURIComponent(model)}`);
+                        if (!res.ok) return;
+                        const blob = await res.blob();
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = `${bench}_${model}_results.jsonl`;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                    } finally { setDownloading(false); }
+                }}
            />
        </div>
 
@@ -2792,6 +2975,75 @@ export const Eval = () => {
             apiBaseUrl={apiBaseUrl}
             lang={lang}
        />
+
+       {/* Result Preview Modal (top-level, not inside bench card) */}
+       <ResultPreviewModal
+           open={previewOpen}
+           onClose={() => setPreviewOpen(false)}
+           previewData={previewData}
+           loading={previewLoading}
+           error={!previewLoading && !previewData}
+           lang={lang}
+           onDownload={async (format) => {
+               if (!previewCtx) return;
+               setDownloading(true);
+               try {
+                   const ext = format;
+                   const endpoint = format === "jsonl"
+                       ? `${apiBaseUrl}/api/eval/result/${threadId}/${encodeURIComponent(previewCtx.bench)}/${encodeURIComponent(previewCtx.model)}`
+                       : `${apiBaseUrl}/api/eval/result/${format}/${threadId}/${encodeURIComponent(previewCtx.bench)}/${encodeURIComponent(previewCtx.model)}`;
+                   const res = await fetch(endpoint);
+                   if (!res.ok) return;
+                   const blob = await res.blob();
+                   const url = URL.createObjectURL(blob);
+                   const a = document.createElement("a");
+                   a.href = url;
+                   a.download = `${previewCtx.bench}_${previewCtx.model}_results.${ext}`;
+                   document.body.appendChild(a);
+                   a.click();
+                   document.body.removeChild(a);
+                   URL.revokeObjectURL(url);
+               } finally { setDownloading(false); }
+           }}
+           downloading={downloading}
+           fetchingAll={fetchingAll}
+           onFetchAll={async () => {
+               if (!previewCtx) throw new Error();
+               setFetchingAll(true);
+               try {
+                   const res = await fetch(`${apiBaseUrl}/api/eval/preview/${threadId}/${encodeURIComponent(previewCtx.bench)}/${encodeURIComponent(previewCtx.model)}?limit=99999`);
+                   if (!res.ok) throw new Error();
+                   return await res.json();
+               } finally { setFetchingAll(false); }
+           }}
+       />
+
+       {/* --- Global Judge Result Modal (view details) --- */}
+       {showJudgeResultModal && judgeTabState.judgeTaskId && (
+         <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/30"
+              onClick={() => setShowJudgeResultModal(false)}>
+           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col overflow-hidden"
+                onClick={e => e.stopPropagation()}>
+             <div className="flex items-center justify-between px-6 py-3 border-b border-slate-100">
+               <h3 className="text-sm font-bold text-slate-700">
+                 {lang === 'zh' ? '裁判评分结果' : 'Judge Results'}
+                 {judgeTabState.judgeBench && <span className="text-slate-400 font-normal ml-2">— {judgeTabState.judgeBench.bench_name}</span>}
+               </h3>
+               <button onClick={() => setShowJudgeResultModal(false)}
+                       className="w-8 h-8 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400">
+                 ✕
+               </button>
+             </div>
+             <div className="flex-1 overflow-hidden">
+               <JudgeResultPanel
+                 apiBaseUrl={apiBaseUrl}
+                 taskId={judgeTabState.judgeTaskId}
+                 lang={lang}
+               />
+             </div>
+           </div>
+         </div>
+       )}
 
     </div>
   );

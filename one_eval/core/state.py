@@ -70,6 +70,9 @@ class ModelConfig:
     max_model_len: Optional[int] = None
     gpu_memory_utilization: float = 0.9
 
+    # API concurrency
+    api_concurrency: int = 16
+
 
 @dataclass
 class NodeState(MainState):

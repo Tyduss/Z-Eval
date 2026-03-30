@@ -1,8 +1,11 @@
 import React, { useRef, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { 
+import JudgeConfigPanel from "@/components/judge/JudgeConfigPanel";
+import JudgeProgressPanel from "@/components/judge/JudgeProgressPanel";
+import {
     Send, Check, Loader2, AlertCircle, ChevronDown, ChevronUp,
-    Database, Bot, Maximize2, X, Save as SaveIcon, Tag, Upload
+    Database, Bot, Maximize2, Minimize2, X, Save as SaveIcon, Tag, Upload,
+    ClipboardCheck, BarChart3, History, Eye, Download
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +14,7 @@ import type { Lang } from "@/lib/i18n";
 
 
 import { ReportView } from "./ReportComponents";
+import { SimpleMarkdown } from "@/components/ui/simple-markdown";
 
 // --- Types ---
 export interface Bench {
@@ -1290,6 +1294,10 @@ export const WorkflowBlock = ({ title, icon: Icon, nodes, activeNodeId, status, 
 
 
 
+// --- Judge Entry Component (LLM-as-Judge trigger) ---
+// Note: JudgeEntry removed — entry point moved to Tab 3 "裁判评分"
+
+
 // --- Summary Bench Card Component ---
 const SummaryBenchCard = ({ bench, lang }: { bench: any, lang: Lang }) => {
     const tt = (zh: string, en: string) => (lang === "zh" ? zh : en);
@@ -1419,103 +1427,325 @@ const SummaryBenchCard = ({ bench, lang }: { bench: any, lang: Lang }) => {
                         )}
                     </div>
                 )} */}
+
+                {/* LLM Judge Entry — moved to Tab 3 */}
             </div>
         </div>
     );
 };
 
-// --- Summary Panel Component ---
-export const SummaryPanel = ({ state, threadId, sidebarWidth, chatWidth, lang }: {
+// --- Judge Report View (Tab 4: renders judge report data natively) ---
+const JudgeReportView = ({ report, lang }: { report: any; lang: Lang }) => {
+    const tt = (zh: string, en: string) => (lang === "zh" ? zh : en);
+
+    const ranking = report.overall?.ranking || [];
+    const radar = report.macro?.radar || {};
+    const errorDist = report.diagnostic?.error_distribution || {};
+    const summary = report.analyst?.summary || report.llm_summary || "";
+
+    return (
+        <div className="space-y-6 animate-in fade-in duration-500 pb-10">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-slate-900 to-slate-800 rounded-2xl p-6 text-white shadow-xl relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-48 h-48 bg-white/5 rounded-full blur-3xl -mr-12 -mt-12 pointer-events-none" />
+                <div className="relative z-10">
+                    <div className="flex items-center gap-2 mb-1">
+                        <ClipboardCheck className="w-5 h-5 text-blue-400" />
+                        <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">
+                            {tt("裁判评分分析报告", "Judge Analysis Report")}
+                        </span>
+                    </div>
+                    <h2 className="text-xl font-bold text-white">{report.bench_name || tt("评测报告", "Evaluation Report")}</h2>
+                    {report.generated_at && (
+                        <p className="text-xs text-slate-400 mt-1">
+                            {tt("生成时间", "Generated")}: {report.generated_at}
+                        </p>
+                    )}
+                </div>
+            </div>
+
+            {/* Ranking Table */}
+            {ranking.length > 0 && (
+                <div className="bg-white rounded-xl border border-slate-100 p-5 shadow-sm">
+                    <h3 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2">
+                        <Tag className="w-4 h-4 text-blue-500" />
+                        {tt("模型排名", "Model Rankings")}
+                    </h3>
+                    <table className="w-full text-xs">
+                        <thead>
+                            <tr className="border-b border-slate-200 text-left">
+                                <th className="py-2 px-2 text-slate-500 w-10">#</th>
+                                <th className="py-2 px-2 text-slate-500">{tt("模型", "Model")}</th>
+                                <th className="py-2 px-2 text-right text-slate-500">{tt("总分", "Overall")}</th>
+                                <th className="py-2 px-2 text-right text-slate-500">{tt("推理", "Think")}</th>
+                                <th className="py-2 px-2 text-right text-slate-500">{tt("回答", "Body")}</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {ranking.map((r: any, i: number) => (
+                                <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
+                                    <td className="py-2 px-2">
+                                        <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${
+                                            i === 0 ? 'bg-amber-100 text-amber-700' :
+                                            i === 1 ? 'bg-slate-100 text-slate-600' :
+                                            i === 2 ? 'bg-orange-50 text-orange-600' :
+                                            'text-slate-400'
+                                        }`}>{i + 1}</span>
+                                    </td>
+                                    <td className="py-2 px-2 font-medium text-slate-700">{r.model}</td>
+                                    <td className="py-2 px-2 text-right font-mono font-bold text-emerald-600">
+                                        {typeof r.overall_score === 'number' ? r.overall_score.toFixed(2) : r.overall_score}
+                                    </td>
+                                    <td className="py-2 px-2 text-right font-mono text-blue-600">
+                                        {typeof r.think_score === 'number' ? r.think_score.toFixed(2) : r.think_score}
+                                    </td>
+                                    <td className="py-2 px-2 text-right font-mono text-blue-600">
+                                        {typeof r.body_score === 'number' ? r.body_score.toFixed(2) : r.body_score}
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+
+            {/* Radar / Score Comparison */}
+            {radar.dimensions && radar.data && Object.keys(radar.data).length > 0 && (
+                <div className="bg-white rounded-xl border border-slate-100 p-5 shadow-sm">
+                    <h3 className="text-sm font-bold text-slate-700 mb-3">{tt("维度对比", "Dimension Comparison")}</h3>
+                    <div className="space-y-3">
+                        {radar.dimensions.map((dim: string) => (
+                            <div key={dim} className="space-y-1">
+                                <div className="text-xs text-slate-500 font-medium">{dim}</div>
+                                <div className="flex items-center gap-3">
+                                    {Object.entries(radar.data).map(([model, scores]: [string, any]) => {
+                                        const val = (scores as any)?.[dim] || 0;
+                                        const pct = Math.min((val / 5) * 100, 100);
+                                        return (
+                                            <div key={model} className="flex-1">
+                                                <div className="flex items-center justify-between text-[10px] mb-0.5">
+                                                    <span className="text-slate-500 truncate">{model}</span>
+                                                    <span className="font-mono text-slate-600">{typeof val === 'number' ? val.toFixed(2) : val}</span>
+                                                </div>
+                                                <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                                                    <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* Error Distribution */}
+            {Object.keys(errorDist).length > 0 && (
+                <div className="bg-white rounded-xl border border-slate-100 p-5 shadow-sm">
+                    <h3 className="text-sm font-bold text-slate-700 mb-3">{tt("问题分布", "Issue Distribution")}</h3>
+                    <div className="space-y-4">
+                        {Object.entries(errorDist).map(([model, issues]: [string, any]) => {
+                            const issueEntries = Object.entries(issues || {}).sort(([,a]: any, [,b]: any) => b - a);
+                            if (issueEntries.length === 0) return null;
+                            return (
+                                <div key={model}>
+                                    <div className="text-xs font-bold text-slate-600 mb-1.5">{model}</div>
+                                    <div className="space-y-1 pl-3 border-l-2 border-slate-100">
+                                        {issueEntries.slice(0, 8).map(([issue, count]: [string, any]) => (
+                                            <div key={issue} className="flex items-center justify-between text-xs">
+                                                <span className="text-slate-500 truncate max-w-[300px]" title={issue}>{issue}</span>
+                                                <span className="text-slate-400 font-mono ml-2 shrink-0">{count}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+
+            {/* LLM Analysis */}
+            {summary && (
+                <div className="bg-white rounded-xl border border-slate-100 p-5 shadow-sm">
+                    <h3 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2">
+                        <Bot className="w-4 h-4 text-violet-500" />
+                        {tt("AI 分析", "AI Analysis")}
+                    </h3>
+                    <div className="text-xs text-slate-600 leading-relaxed whitespace-pre-wrap">
+                        <SimpleMarkdown content={summary} />
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+// --- Summary Panel Component (4 tabs) ---
+type ViewMode = "benches" | "output" | "judge" | "report";
+
+interface JudgeTabState {
+  judgeBench: any;
+  judgeModels: { model_name: string; detail_path: string }[];
+  judgeTaskId: string | null;
+  judgeStatus: 'idle' | 'running' | 'completed' | 'failed' | null;
+  judgeHistory: any[];
+  judgeReport: any;
+  judgeReportStatus: 'idle' | 'generating' | 'done' | 'error';
+}
+
+const initialJudgeTabState: JudgeTabState = {
+  judgeBench: null,
+  judgeModels: [],
+  judgeTaskId: null,
+  judgeStatus: null,
+  judgeHistory: [],
+  judgeReport: null,
+  judgeReportStatus: 'idle',
+};
+
+export const SummaryPanel = ({
+  state, threadId, sidebarWidth, chatWidth, lang, apiBaseUrl,
+  judgeTabState, onJudgeAction,
+  onViewJudgeResult,
+  isFullscreen, onFullscreenChange,
+  onPreviewModel, onDownloadModel,
+}: {
     state: WorkflowState | null,
     threadId: string | null,
     sidebarWidth: number,
     chatWidth: number,
-    lang: Lang
+    lang: Lang,
+    apiBaseUrl: string,
+    judgeTabState: JudgeTabState,
+    onJudgeAction: (action: string, payload?: any) => void,
+    onViewJudgeResult?: () => void,
+    isFullscreen?: boolean,
+    onFullscreenChange?: (fullscreen: boolean) => void,
+    onPreviewModel?: (bench: string, model: string) => void,
+    onDownloadModel?: (bench: string, model: string) => void,
 }) => {
     const tt = (zh: string, en: string) => (lang === "zh" ? zh : en);
     const [isOpen, setIsOpen] = React.useState(true);
-    const [viewMode, setViewMode] = React.useState<"benches" | "report">("benches");
+    const [viewMode, setViewMode] = React.useState<ViewMode>("benches");
+
+    const fullscreen = isFullscreen ?? false;
 
     if (!state) return null;
 
     const hasReport = state.reports && state.reports["default"];
+    const hasModelOutput = state.benches?.some((b: any) => {
+      const er = b.meta?.eval_results || {};
+      return Object.keys(er).length > 0 || b.meta?.eval_detail_path;
+    });
+    const hasJudgeResult = judgeTabState.judgeStatus === 'completed' && judgeTabState.judgeTaskId;
 
-    // Auto-switch to report view when available and not manually switched
-    // useEffect(() => {
-    //     if (hasReport) {
-    //         setViewMode("report");
-    //         setIsOpen(true);
-    //     }
-    // }, [hasReport]);
+    const isTabDisabled = (tab: ViewMode): boolean => {
+      if (tab === "judge") return !hasModelOutput;
+      if (tab === "report") return !hasJudgeResult;
+      return false;
+    };
+
+    const tabClass = (tab: ViewMode, activeColor = "text-slate-600 border-slate-600") =>
+      cn(
+        "flex items-center gap-2 text-xs font-bold uppercase tracking-wider h-full border-b-2 transition-all cursor-pointer px-2",
+        viewMode === tab ? activeColor : "text-slate-400 border-transparent hover:text-slate-500",
+        isTabDisabled(tab) && "opacity-40 cursor-not-allowed hover:text-slate-400"
+      );
+
+    const handleTabClick = (tab: ViewMode) => {
+      if (isTabDisabled(tab)) return;
+      setViewMode(tab);
+      setIsOpen(true);
+    };
 
     return (
-        <motion.div 
+        <motion.div
             initial={{ y: 100 }}
-            animate={{ 
-                y: 0, 
-                left: sidebarWidth + 60, 
+            animate={{
+                y: 0,
+                left: sidebarWidth + 60,
                 right: chatWidth + 0,
-                height: isOpen ? (viewMode === "report" ? "85vh" : "auto") : "auto" 
+                height: !isOpen ? 48 : fullscreen ? "100vh" : "60vh"
             }}
             className="fixed bottom-0 z-40 px-8 pb-0 pointer-events-none transition-all duration-300"
         >
-            <div className="max-w-6xl mx-auto pointer-events-auto h-full flex flex-col justify-end">
-                <div className="bg-white/90 backdrop-blur-xl border border-slate-200 rounded-t-2xl shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.1)] overflow-hidden ring-1 ring-slate-100 flex flex-col max-h-full transition-all duration-300">
-                    <div 
-                        className="h-12 bg-slate-50/50 border-b border-slate-100 flex items-center justify-between px-6 shrink-0"
-                    >
-                        <div className="flex items-center gap-6 h-full">
-                             <div 
-                                className={cn(
-                                    "flex items-center gap-2 text-xs font-bold uppercase tracking-wider h-full border-b-2 transition-all cursor-pointer px-2",
-                                    viewMode === "benches" ? "text-slate-600 border-slate-600" : "text-slate-400 border-transparent hover:text-slate-500"
-                                )}
-                                onClick={() => { setViewMode("benches"); setIsOpen(true); }}
-                            >
+            <div className="max-w-6xl mx-auto pointer-events-auto h-full flex flex-col">
+                <div className="bg-white/90 backdrop-blur-xl border border-slate-200 rounded-t-2xl shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.1)] overflow-hidden ring-1 ring-slate-100 flex flex-col h-full transition-all duration-300">
+                    {/* Tab Header */}
+                    <div className="h-12 bg-slate-50/50 border-b border-slate-100 flex items-center justify-between px-6 shrink-0">
+                        <div className="flex items-center gap-5 h-full">
+                            {/* Tab 1: 上下文 */}
+                            <div className={tabClass("benches")} onClick={() => handleTabClick("benches")}>
                                 <Database className="w-4 h-4" />
                                 {tt("上下文", "Context")}
                             </div>
-                            
-                            {hasReport && (
-                                <div 
-                                    className={cn(
-                                        "flex items-center gap-2 text-xs font-bold uppercase tracking-wider h-full border-b-2 transition-all cursor-pointer px-2 relative",
-                                        viewMode === "report" ? "text-violet-600 border-violet-600 bg-violet-50/50" : "text-slate-400 border-transparent hover:text-slate-500"
-                                    )}
-                                    onClick={() => { setViewMode("report"); setIsOpen(true); }}
-                                >
-                                    <Bot className="w-4 h-4" />
-                                    {tt("最终报告", "Final Report")}
-                                    <span className="absolute top-3 right-0 w-1.5 h-1.5 bg-violet-500 rounded-full animate-pulse" />
-                                </div>
-                            )}
+
+                            {/* Tab 2: 模型输出 */}
+                            <div className={tabClass("output")} onClick={() => handleTabClick("output")}>
+                                <Bot className="w-4 h-4" />
+                                {tt("模型输出", "Model Output")}
+                            </div>
+
+                            {/* Tab 3: 裁判评分 */}
+                            <div className={tabClass("judge", "text-blue-600 border-blue-600")} onClick={() => handleTabClick("judge")}>
+                                <ClipboardCheck className="w-4 h-4" />
+                                {tt("裁判评分", "LLM Judge")}
+                            </div>
+
+                            {/* Tab 4: 分析报告 */}
+                            <div className={tabClass("report", "text-violet-600 border-violet-600 bg-violet-50/50")} onClick={() => handleTabClick("report")}>
+                                <BarChart3 className="w-4 h-4" />
+                                {tt("分析报告", "Analysis Report")}
+                            </div>
                         </div>
 
-                        <div 
-                            className="flex items-center gap-2 cursor-pointer p-2 hover:bg-slate-100 rounded-lg transition-colors"
-                            onClick={() => setIsOpen(!isOpen)}
-                        >
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                                {isOpen ? tt("收起", "Collapse") : tt("展开", "Expand")}
-                            </span>
-                            {isOpen ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronUp className="w-4 h-4 text-slate-400" />}
+                        <div className="flex items-center gap-1">
+                            {/* 展出全部 / 退出全屏 */}
+                            {isOpen && (
+                                <div
+                                    className="flex items-center gap-1.5 cursor-pointer p-2 hover:bg-slate-100 rounded-lg transition-colors"
+                                    onClick={() => onFullscreenChange?.(!fullscreen)}
+                                >
+                                    {fullscreen
+                                        ? <Minimize2 className="w-3.5 h-3.5 text-slate-400" />
+                                        : <Maximize2 className="w-3.5 h-3.5 text-slate-400" />
+                                    }
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                                        {fullscreen ? tt("退出全屏", "Exit Full") : tt("展出全部", "Full View")}
+                                    </span>
+                                </div>
+                            )}
+                            {/* 收起 / 展开 */}
+                            <div
+                                className="flex items-center gap-1.5 cursor-pointer p-2 hover:bg-slate-100 rounded-lg transition-colors"
+                                onClick={() => setIsOpen(!isOpen)}
+                            >
+                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                                    {isOpen ? tt("收起", "Collapse") : tt("展开", "Expand")}
+                                </span>
+                                {isOpen ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronUp className="w-4 h-4 text-slate-400" />}
+                            </div>
                         </div>
                     </div>
 
+                    {/* Tab Content */}
                     <AnimatePresence mode="wait">
                         {isOpen && (
-                            <motion.div 
+                            <motion.div
                                 key={viewMode}
                                 initial={{ opacity: 0 }}
                                 animate={{ opacity: 1 }}
                                 exit={{ opacity: 0 }}
                                 transition={{ duration: 0.2 }}
-                                className="overflow-hidden flex-1 flex flex-col bg-slate-50/30"
+                                className="overflow-hidden flex-1 flex flex-col bg-slate-50/30 min-h-0"
                             >
-                                {viewMode === "benches" ? (
-                                    <div className="p-6 overflow-x-auto">
-                                        <div className="flex gap-4 pb-4 scrollbar-hide items-start min-h-[120px]">
-                                            {state.benches?.length ? state.benches.map((b, i) => (
+                                {/* Tab 1: 上下文 */}
+                                {viewMode === "benches" && (
+                                    <div className="p-6 overflow-y-auto flex-1 scrollbar-thin scrollbar-thumb-slate-200">
+                                        <div className="flex gap-4 pb-4 scrollbar-hide items-start">
+                                            {state.benches?.length ? state.benches.map((b: any, i: number) => (
                                                 <SummaryBenchCard key={i} bench={b} lang={lang} />
                                             )) : (
                                                 <div className="h-24 w-full border-2 border-dashed border-slate-100 rounded-xl flex items-center justify-center text-xs text-slate-400">
@@ -1524,12 +1754,113 @@ export const SummaryPanel = ({ state, threadId, sidebarWidth, chatWidth, lang }:
                                             )}
                                         </div>
                                     </div>
-                                ) : (
-                                    <div className="p-8 overflow-y-auto flex-1 min-h-[400px] scrollbar-thin scrollbar-thumb-slate-200">
-                                        <div className="max-w-5xl mx-auto">
-                                            <ReportView report={state.reports?.["default"]} threadId={threadId} lang={lang} />
-                                        </div>
+                                )}
+
+                                {/* Tab 2: 模型输出 */}
+                                {viewMode === "output" && (
+                                    <div className="p-6 overflow-y-auto flex-1 scrollbar-thin scrollbar-thumb-slate-200">
+                                        {(() => {
+                                          // Collect all models with results across all benches
+                                          const entries: { bench: string; model: string; stats: Record<string, any> }[] = [];
+                                          state.benches?.forEach((b: any) => {
+                                            const er = b.meta?.eval_results || {};
+                                            for (const [name, info] of Object.entries(er)) {
+                                              entries.push({ bench: b.bench_name, model: name, stats: (info as any)?.stats || {} });
+                                            }
+                                          });
+                                          if (entries.length === 0 && state.reports?.["default"]) {
+                                            return (
+                                              <div className="max-w-5xl mx-auto">
+                                                <ReportView report={state.reports["default"]} threadId={threadId} lang={lang} />
+                                              </div>
+                                            );
+                                          }
+                                          if (entries.length === 0) {
+                                            return (
+                                              <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+                                                <Bot className="w-12 h-12 mb-3 opacity-30" />
+                                                <p className="text-sm">{tt("暂无模型输出数据", "No model output data yet")}</p>
+                                              </div>
+                                            );
+                                          }
+                                          return (
+                                            <div className="max-w-5xl mx-auto space-y-4">
+                                              {entries.map(({ bench, model, stats }) => (
+                                                <div key={`${bench}-${model}`} className="bg-white rounded-lg border border-slate-100 p-4 shadow-sm">
+                                                  <div className="flex items-center justify-between mb-2">
+                                                    <div className="flex items-center gap-2">
+                                                      <span className="text-sm font-bold text-slate-700">{bench}</span>
+                                                      <span className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded">{model}</span>
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                      <button
+                                                        type="button"
+                                                        className="text-[10px] bg-blue-500 hover:bg-blue-600 text-white px-2 py-1 rounded-md font-medium transition-colors flex items-center gap-1 cursor-pointer"
+                                                        onClick={() => onPreviewModel?.(bench, model)}
+                                                      ><Eye className="w-3 h-3" /> {tt("预览", "Preview")}</button>
+                                                      <button
+                                                        type="button"
+                                                        className="text-[10px] bg-emerald-500 hover:bg-emerald-600 text-white px-2 py-1 rounded-md font-medium transition-colors flex items-center gap-1 cursor-pointer"
+                                                        onClick={() => onDownloadModel?.(bench, model)}
+                                                      ><Download className="w-3 h-3" /> {tt("下载", "Download")}</button>
+                                                    </div>
+                                                  </div>
+                                                  {Object.keys(stats).length > 0 ? (
+                                                    <div className="flex flex-wrap gap-2">
+                                                      {Object.entries(stats)
+                                                        .filter(([k]) => !["bench_name_or_prefix", "metric", "type"].includes(k))
+                                                        .map(([k, v]) => (
+                                                          <span key={k} className="text-xs bg-slate-50 px-2 py-1 rounded border border-slate-100">
+                                                            <span className="text-slate-400">{k}:</span>{" "}
+                                                            <span className="font-mono font-bold text-slate-600">{typeof v === "number" ? (Number.isInteger(v) ? v : v.toFixed(4)) : String(v)}</span>
+                                                          </span>
+                                                        ))
+                                                      }
+                                                    </div>
+                                                  ) : (
+                                                    <span className="text-xs text-slate-400 italic">{tt("仅生成结果（无评估指标）", "Generation only (no eval metrics)")}</span>
+                                                  )}
+                                                </div>
+                                              ))}
+                                            </div>
+                                          );
+                                        })()}
                                     </div>
+                                )}
+
+                                {/* Tab 3: 裁判评分 */}
+                                {viewMode === "judge" && (
+                                  <JudgeTabContent
+                                    state={state}
+                                    lang={lang}
+                                    apiBaseUrl={apiBaseUrl}
+                                    threadId={threadId}
+                                    judgeTabState={judgeTabState}
+                                    onJudgeAction={onJudgeAction}
+                                    onViewJudgeResult={onViewJudgeResult}
+                                  />
+                                )}
+
+                                {/* Tab 4: 分析报告 */}
+                                {viewMode === "report" && (
+                                  <div className="p-6 overflow-y-auto flex-1 scrollbar-thin scrollbar-thumb-slate-200">
+                                    <div className="max-w-5xl mx-auto">
+                                      {judgeTabState.judgeReportStatus === 'generating' ? (
+                                        <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+                                          <Loader2 className="w-8 h-8 animate-spin text-blue-500 mb-3" />
+                                          <p className="text-sm">{tt("正在生成分析报告...", "Generating analysis report...")}</p>
+                                          <p className="text-xs text-slate-300 mt-1">{tt("LLM 正在分析评分数据", "LLM is analyzing judge results")}</p>
+                                        </div>
+                                      ) : judgeTabState.judgeReport ? (
+                                        <JudgeReportView report={judgeTabState.judgeReport} lang={lang} />
+                                      ) : (
+                                        <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+                                          <BarChart3 className="w-12 h-12 mb-3 opacity-30" />
+                                          <p className="text-sm">{tt("请先完成裁判评分，然后生成分析报告", "Complete judging first, then generate the analysis report")}</p>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
                                 )}
                             </motion.div>
                         )}
@@ -1537,6 +1868,168 @@ export const SummaryPanel = ({ state, threadId, sidebarWidth, chatWidth, lang }:
                 </div>
             </div>
         </motion.div>
+    );
+};
+
+
+// --- Judge Tab Content (Tab 3) ---
+const JudgeTabContent = ({
+  state, lang, apiBaseUrl, threadId, judgeTabState, onJudgeAction, onViewJudgeResult,
+}: {
+  state: WorkflowState,
+  lang: Lang,
+  apiBaseUrl: string,
+  threadId: string | null,
+  judgeTabState: JudgeTabState,
+  onJudgeAction: (action: string, payload?: any) => void,
+  onViewJudgeResult?: () => void,
+}) => {
+    const tt = (zh: string, en: string) => (lang === "zh" ? zh : en);
+
+    // Collect all models with results across all benches
+    const allModels: { model_name: string; detail_path: string }[] = [];
+    const benchesWithResults: any[] = [];
+    state.benches?.forEach((b: any) => {
+      const er = b.meta?.eval_results || {};
+      if (Object.keys(er).length > 0 || b.meta?.eval_detail_path) {
+        benchesWithResults.push(b);
+        if (Object.keys(er).length > 0) {
+          for (const [name, info] of Object.entries(er)) {
+            const path = (info as any)?.detail_path;
+            if (path && !allModels.find(m => m.model_name === name)) {
+              allModels.push({ model_name: name, detail_path: path });
+            }
+          }
+        } else if (b.meta?.eval_detail_path) {
+          if (!allModels.find(m => m.model_name === "Model")) {
+            allModels.push({ model_name: "Model", detail_path: b.meta.eval_detail_path });
+          }
+        }
+      }
+    });
+
+    const { judgeStatus, judgeTaskId, judgeHistory, judgeReportStatus } = judgeTabState;
+
+    // Phase: idle -> running -> completed
+    const isRunning = judgeStatus === 'running';
+    const isCompleted = judgeStatus === 'completed';
+
+    return (
+      <div className="p-6 overflow-y-auto flex-1 space-y-4">
+        {/* Phase 1: Config + Start */}
+        {!isRunning && !isCompleted && (
+          <>
+            {allModels.length > 0 ? (
+              <>
+                <div className="flex items-center gap-2 mb-2">
+                  <ClipboardCheck className="w-4 h-4 text-blue-500" />
+                  <span className="text-sm font-bold text-slate-700">{tt("裁判评分配置", "Judge Scoring Config")}</span>
+                </div>
+                <JudgeConfigPanel
+                  apiBaseUrl={apiBaseUrl}
+                  models={allModels}
+                  lang={lang}
+                  onStart={(config: any) => onJudgeAction("start", config)}
+                />
+              </>
+            ) : (
+              <div className="flex flex-col items-center justify-center py-12 text-slate-400">
+                <ClipboardCheck className="w-10 h-10 mb-2 opacity-30" />
+                <p className="text-sm">{tt("请先运行模型评测，获取模型输出数据", "Run model evaluation first to get output data")}</p>
+              </div>
+            )}
+
+            {/* History */}
+            {judgeHistory.length > 0 && (
+              <div className="border-t border-slate-100 pt-4 mt-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <History className="w-4 h-4 text-slate-400" />
+                  <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">{tt("历史评分记录", "Judge History")}</span>
+                </div>
+                <div className="space-y-1.5">
+                  {judgeHistory.map((h: any) => (
+                    <div key={h.task_id}
+                      className="flex items-center justify-between px-3 py-2 rounded-lg border border-slate-100 bg-white hover:bg-slate-50 cursor-pointer transition-colors"
+                      onClick={() => onJudgeAction("loadHistory", h)}
+                    >
+                      <div className="flex items-center gap-3">
+                        <span className={`w-2 h-2 rounded-full ${h.status === 'completed' ? 'bg-emerald-500' : h.status === 'failed' ? 'bg-red-400' : 'bg-amber-400'}`} />
+                        <span className="text-xs text-slate-600">{h.bench_name}</span>
+                        <span className="text-[10px] text-slate-400">{h.started_at?.slice(0, 16)}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-slate-400">{(h.model_names || []).join(', ')}</span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${h.status === 'completed' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-500'}`}>
+                          {h.status}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Phase 2: Running */}
+        {isRunning && judgeTaskId && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />
+              <span className="text-sm font-bold text-slate-700">{tt("评分进行中...", "Judging in progress...")}</span>
+            </div>
+            <JudgeProgressPanel
+              apiBaseUrl={apiBaseUrl}
+              taskId={judgeTaskId}
+              onComplete={() => onJudgeAction("complete")}
+              lang={lang}
+            />
+          </div>
+        )}
+
+        {/* Phase 3: Completed */}
+        {isCompleted && judgeTaskId && (
+          <div className="space-y-4">
+            <div className="flex items-center gap-2">
+              <Check className="w-4 h-4 text-emerald-500" />
+              <span className="text-sm font-bold text-slate-700">{tt("评分完成", "Judging Complete")}</span>
+            </div>
+
+            {/* Summary */}
+            <div className="bg-emerald-50/50 border border-emerald-200 rounded-lg px-4 py-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-emerald-700">{tt("评分已完成，可查看详细结果或生成分析报告", "Judging complete. View details or generate analysis report.")}</span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => onViewJudgeResult?.()}
+                className="px-4 py-2 rounded-lg text-xs font-semibold text-blue-600 bg-blue-50 border border-blue-200 hover:bg-blue-100 transition-colors"
+              >
+                {tt("查看详细结果", "View Details")}
+              </button>
+              <button
+                onClick={() => onJudgeAction("generateReport")}
+                disabled={judgeReportStatus === 'generating'}
+                className="px-4 py-2 rounded-lg text-xs font-semibold text-violet-600 bg-violet-50 border border-violet-200 hover:bg-violet-100 transition-colors disabled:opacity-50"
+              >
+                {judgeReportStatus === 'generating'
+                  ? tt("生成中...", "Generating...")
+                  : judgeReportStatus === 'done'
+                    ? tt("重新生成报告", "Regenerate Report")
+                    : tt("生成分析报告", "Generate Report")}
+              </button>
+              <button
+                onClick={() => onJudgeAction("reset")}
+                className="px-4 py-2 rounded-lg text-xs text-slate-500 hover:bg-slate-100 border border-slate-200 transition-colors"
+              >
+                {tt("重新评分", "Re-judge")}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     );
 };
 

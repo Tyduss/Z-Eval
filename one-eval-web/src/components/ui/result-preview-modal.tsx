@@ -21,6 +21,7 @@ interface ResultPreviewModalProps {
     downloading?: boolean;
     onFetchAll?: () => Promise<PreviewData>;
     fetchingAll?: boolean;
+    inline?: boolean;
 }
 
 const tt = (lang: Lang, zh: string, en: string) => (lang === "zh" ? zh : en);
@@ -99,6 +100,7 @@ export const ResultPreviewModal = ({
     downloading = false,
     onFetchAll,
     fetchingAll = false,
+    inline = false,
 }: ResultPreviewModalProps) => {
     const [showAll, setShowAll] = useState(false);
     const [showRaw, setShowRaw] = useState(false);
@@ -126,17 +128,16 @@ export const ResultPreviewModal = ({
         }
     };
 
-    if (!open) return null;
+    if (!open && !inline) return null;
+    if (inline && !previewData && !loading) return null;
 
     const displayRows = activeData?.rows || [];
     const displayTotal = activeData?.total || 0;
     const displayColumns = activeData?.columns || [];
     const hasMore = activeData ? activeData.rows.length < activeData.total : false;
 
-    return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col relative z-10 overflow-hidden">
+    const content = (
+        <>
                 {/* Header */}
                 <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/50 shrink-0">
                     <div>
@@ -277,6 +278,18 @@ export const ResultPreviewModal = ({
                         </div>
                     </div>
                 )}
+        </>
+    );
+
+    if (inline) {
+        return <div className="h-full flex flex-col overflow-hidden">{content}</div>;
+    }
+
+    return (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col relative z-10 overflow-hidden">
+                {content}
             </div>
         </div>
     );

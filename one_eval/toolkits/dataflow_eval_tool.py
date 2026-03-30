@@ -112,7 +112,7 @@ class DataFlowEvalTool:
                 serving = APILLMServing_request(
                     api_url=api_url,
                     model_name=model_name_or_path,
-                    max_workers=16,
+                    max_workers=getattr(config, "api_concurrency", 16) or 16,
                 )
         else:
             serving = LocalModelLLMServing_vllm(

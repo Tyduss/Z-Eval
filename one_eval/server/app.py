@@ -1103,6 +1103,7 @@ async def manual_start(req: ManualStartRequest):
                 tensor_parallel_size=int(tm.get("tensor_parallel_size", 1) or 1),
                 max_model_len=tm.get("max_model_len"),
                 gpu_memory_utilization=float(tm.get("gpu_memory_utilization", 0.9) or 0.9),
+                api_concurrency=int(tm.get("api_concurrency", 16) or 16),
             )
             target_models_list.append(cfg)
 
@@ -1130,6 +1131,7 @@ async def manual_start(req: ManualStartRequest):
                 tensor_parallel_size=int(tm.get("tensor_parallel_size", 1) or 1),
                 max_model_len=tm.get("max_model_len"),
                 gpu_memory_utilization=float(tm.get("gpu_memory_utilization", 0.9) or 0.9),
+                api_concurrency=int(tm.get("api_concurrency", 16) or 16),
             )
             target_models_list.append(single_model)
 
@@ -2471,6 +2473,536 @@ async def preview_eval_result(thread_id: str, bench_name: str, model_name: str, 
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading result file: {str(e)}")
+
+
+# ============================================================
+# LLM-as-Judge 裁判评分 API
+# ============================================================
+
+JUDGE_TASKS: Dict[str, asyncio.Task] = {}
+JUDGE_TASK_META: Dict[str, Dict[str, Any]] = {}
+JUDGE_META_FILE = DATA_DIR / "judge_meta.json"
+
+
+def _load_judge_meta():
+    """从磁盘恢复裁判任务元数据"""
+    global JUDGE_TASK_META
+    data = _load_json_file(JUDGE_META_FILE, default={})
+    if isinstance(data, dict):
+        JUDGE_TASK_META = data
+        log.info(f"Restored {len(data)} judge task(s) from {JUDGE_META_FILE}")
+
+
+def _save_judge_meta():
+    """持久化裁判任务元数据到磁盘"""
+    _write_json_file(JUDGE_META_FILE, JUDGE_TASK_META)
+
+
+# 启动时恢复
+_load_judge_meta()
+
+
+class JudgeStartRequest(BaseModel):
+    bench_name: str
+    thread_id: Optional[str] = None             # 关联的会话 ID
+    model_names: List[str]                     # 待评分的模型名列表
+    model_data_paths: Dict[str, str]          # {model_name: step1_jsonl_path}
+    scoring_prompt: str                        # 执行标准 Prompt
+    judge_model: Dict[str, Any]                # 裁判模型配置
+    concurrency: int = 5
+    question_key: str = "question"
+    answer_key: str = "generated_ans"
+    context_key: Optional[str] = None
+
+
+@app.post("/api/judge/start")
+async def start_judge(req: JudgeStartRequest):
+    """启动裁判评分任务（后台执行）"""
+    task_id = f"judge_{uuid.uuid4().hex[:12]}"
+
+    # Fallback: 如果用户没填 api_key / api_url，使用系统 agent 配置
+    cfg = load_server_config()
+    agent_cfg = cfg.get("agent") or {}
+
+    judge_api_key = req.judge_model.get("api_key")
+    if not judge_api_key or not str(judge_api_key).strip():
+        judge_api_key = agent_cfg.get("api_key") or ""
+
+    judge_api_url = req.judge_model.get("api_url")
+    if not judge_api_url or not str(judge_api_url).strip():
+        judge_api_url = agent_cfg.get("base_url") or ""
+
+    judge_model_config = ModelConfig(
+        model_name_or_path=req.judge_model.get("model_name_or_path") or req.judge_model.get("path", ""),
+        is_api=True,
+        api_url=judge_api_url,
+        api_key=judge_api_key,
+        temperature=0.0,
+        max_tokens=4096,
+    )
+
+    # 计算预估样本总数
+    total_samples = 0
+    for path in req.model_data_paths.values():
+        if os.path.exists(path):
+            total_samples += _count_file_rows(Path(path), Path(path).suffix)
+
+    from one_eval.judges.llm_judge import JudgeTaskConfig, LLMJudge
+    from one_eval.judges.score_aggregator import ScoreAggregator
+
+    task_config = JudgeTaskConfig(
+        task_id=task_id,
+        bench_name=req.bench_name,
+        scoring_prompt=req.scoring_prompt,
+        judge_model=judge_model_config,
+        model_names=req.model_names,
+        model_data_paths=req.model_data_paths,
+        question_key=req.question_key,
+        answer_key=req.answer_key,
+        context_key=req.context_key,
+        concurrency=req.concurrency,
+    )
+
+    JUDGE_TASK_META[task_id] = {
+        "task_id": task_id,
+        "bench_name": req.bench_name,
+        "thread_id": req.thread_id,
+        "status": "running",
+        "total_samples": total_samples,
+        "judged": 0,
+        "model_names": req.model_names,
+        "models_progress": {},
+        "started_at": _now_iso(),
+    }
+    _save_judge_meta()
+
+    async def _run_judge():
+        judge = LLMJudge(task_config)
+        aggregator = ScoreAggregator()
+
+        try:
+            all_results = await judge.judge_all_models(
+                progress_cb=lambda p: _update_judge_progress(task_id, p)
+            )
+
+            # 聚合统计
+            model_stats = {}
+            for name, results in all_results.items():
+                model_stats[name] = aggregator.aggregate_model(results)
+            comparison = aggregator.aggregate_comparison(all_results)
+
+            # 保存结果
+            saved_paths = judge.save_results(all_results)
+            summary_path = aggregator.save_summary(
+                model_stats, comparison, judge._output_dir
+            )
+
+            JUDGE_TASK_META[task_id].update({
+                "status": "completed",
+                "judged": total_samples,
+                "detail_path": saved_paths.get("_merged"),
+                "summary_path": summary_path,
+                "model_detail_paths": {k: v for k, v in saved_paths.items() if k != "_merged"},
+                "completed_at": _now_iso(),
+            })
+            _save_judge_meta()
+
+        except Exception as e:
+            log.error(f"Judge task {task_id} failed: {e}", exc_info=True)
+            JUDGE_TASK_META[task_id].update({
+                "status": "failed",
+                "error": str(e),
+                "completed_at": _now_iso(),
+            })
+            _save_judge_meta()
+
+    task = asyncio.create_task(_run_judge())
+    JUDGE_TASKS[task_id] = task
+
+    return {
+        "task_id": task_id,
+        "total_samples": total_samples,
+        "estimated_calls": total_samples,
+        "status": "started",
+    }
+
+
+def _update_judge_progress(task_id: str, progress: Dict[str, Any]):
+    """更新裁判任务进度"""
+    meta = JUDGE_TASK_META.get(task_id)
+    if not meta:
+        return
+    model_name = progress.get("model_name", "")
+    status = progress.get("status", "running")
+
+    if status == "done":
+        meta["models_progress"][model_name] = {
+            "status": "done",
+            "judged": progress.get("judged", 0),
+            "total": progress.get("total", 0),
+            "percent": 100.0,
+        }
+    elif status == "running":
+        meta["models_progress"][model_name] = {
+            "status": "running",
+            "judged": progress.get("judged", 0),
+            "total": progress.get("total", 0),
+            "percent": progress.get("percent", 0.0),
+        }
+
+    # 计算总进度
+    total_judged = 0
+    for mp in meta["models_progress"].values():
+        total_judged += mp.get("judged", 0)
+    meta["judged"] = total_judged
+    meta["percent"] = round(total_judged / max(meta["total_samples"], 1) * 100, 1)
+    _save_judge_meta()
+
+
+@app.get("/api/judge/progress/{task_id}")
+async def get_judge_progress(task_id: str):
+    """查询裁判评分进度"""
+    meta = JUDGE_TASK_META.get(task_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Judge task not found")
+    return meta
+
+
+@app.get("/api/judge/result/{task_id}")
+async def get_judge_result(task_id: str):
+    """获取裁判评分结果（摘要 + 统计）"""
+    meta = JUDGE_TASK_META.get(task_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Judge task not found")
+
+    summary_path = meta.get("summary_path")
+    if not summary_path or not os.path.exists(summary_path):
+        return {"task_id": task_id, "status": meta.get("status", "unknown"), "detail": "summary not ready"}
+
+    try:
+        with open(summary_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading summary: {str(e)}")
+
+
+@app.get("/api/judge/detail/{task_id}")
+async def get_judge_detail(task_id: str, model_name: Optional[str] = None, limit: int = 50, offset: int = 0):
+    """获取裁判评分明细"""
+    meta = JUDGE_TASK_META.get(task_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Judge task not found")
+
+    # 查找明细文件
+    detail_path = None
+    if model_name:
+        detail_path = meta.get("model_detail_paths", {}).get(model_name)
+    else:
+        detail_path = meta.get("detail_path")
+
+    if not detail_path or not os.path.exists(detail_path):
+        raise HTTPException(status_code=404, detail="Detail file not found")
+
+    try:
+        records = []
+        with open(detail_path, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+                if i < offset:
+                    continue
+                if limit > 0 and len(records) >= limit:
+                    break
+                records.append(json.loads(line))
+        return {
+            "total": _count_file_rows(Path(detail_path), Path(detail_path).suffix),
+            "shown": len(records),
+            "records": records,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading detail: {str(e)}")
+
+
+@app.get("/api/judge/result/{task_id}/csv")
+async def download_judge_csv(task_id: str):
+    """下载裁判评分结果为 CSV"""
+    from fastapi.responses import StreamingResponse
+    import pandas as pd
+    import io
+
+    meta = JUDGE_TASK_META.get(task_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Judge task not found")
+
+    detail_path = meta.get("detail_path")
+    if not detail_path or not os.path.exists(detail_path):
+        raise HTTPException(status_code=404, detail="Detail file not found")
+
+    try:
+        df = pd.read_json(detail_path, lines=True)
+        buf = io.StringIO()
+        df.to_csv(buf, index=False, encoding="utf-8-sig")
+        buf.seek(0)
+        from urllib.parse import quote
+        safe_name = f"judge_{task_id}_results.csv"
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(safe_name)}"},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error converting to CSV: {str(e)}")
+
+
+@app.get("/api/judge/result/{task_id}/xlsx")
+async def download_judge_xlsx(task_id: str):
+    """下载裁判评分结果为 XLSX"""
+    from fastapi.responses import Response
+    import pandas as pd
+    import io
+
+    meta = JUDGE_TASK_META.get(task_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Judge task not found")
+
+    detail_path = meta.get("detail_path")
+    if not detail_path or not os.path.exists(detail_path):
+        raise HTTPException(status_code=404, detail="Detail file not found")
+
+    try:
+        df = pd.read_json(detail_path, lines=True)
+        buf = io.BytesIO()
+        df.to_excel(buf, index=False, engine="openpyxl")
+        buf.seek(0)
+        from urllib.parse import quote
+        safe_name = f"judge_{task_id}_results.xlsx"
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(safe_name)}"},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error converting to XLSX: {str(e)}")
+
+
+@app.get("/api/judge/tasks")
+async def list_judge_tasks():
+    """列出所有裁判评分任务"""
+    return list(JUDGE_TASK_META.values())
+
+
+@app.get("/api/judge/by-thread/{thread_id}")
+async def get_judge_tasks_by_thread(thread_id: str):
+    """获取指定会话的所有裁判评分任务"""
+    tasks = [m for m in JUDGE_TASK_META.values() if m.get("thread_id") == thread_id]
+    return tasks
+
+
+# === 报告缓存 ===
+JUDGE_REPORTS: Dict[str, Dict[str, Any]] = {}
+JUDGE_REPORTS_FILE = DATA_DIR / "judge_reports.json"
+
+
+def _load_judge_reports():
+    """从磁盘恢复报告缓存"""
+    global JUDGE_REPORTS
+    data = _load_json_file(JUDGE_REPORTS_FILE, default={})
+    if isinstance(data, dict):
+        JUDGE_REPORTS = data
+        log.info(f"Restored {len(data)} judge report(s) from {JUDGE_REPORTS_FILE}")
+
+
+def _save_judge_reports():
+    """持久化报告缓存到磁盘"""
+    _write_json_file(JUDGE_REPORTS_FILE, JUDGE_REPORTS)
+
+
+# 启动时恢复
+_load_judge_reports()
+
+
+@app.post("/api/judge/report/{task_id}")
+async def generate_judge_report(task_id: str):
+    """基于裁判评分结果生成分析报告（调用 LLM 分析）"""
+    meta = JUDGE_TASK_META.get(task_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Judge task not found")
+    if meta.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Judge task not completed yet")
+
+    summary_path = meta.get("summary_path")
+    if not summary_path or not os.path.exists(summary_path):
+        raise HTTPException(status_code=404, detail="Summary file not found")
+
+    # 读取聚合结果
+    with open(summary_path, "r", encoding="utf-8") as f:
+        summary_data = json.load(f)
+
+    # 读取部分明细（取前 20 条用于 case study）
+    detail_path = meta.get("detail_path")
+    sample_records = []
+    if detail_path and os.path.exists(detail_path):
+        with open(detail_path, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i >= 20:
+                    break
+                line = line.strip()
+                if line:
+                    sample_records.append(json.loads(line))
+
+    # 获取 LLM 配置
+    cfg = load_server_config()
+    agent_cfg = cfg.get("agent") or {}
+
+    # 构建 prompt 让 LLM 分析
+    analysis_prompt = _build_report_prompt(summary_data, sample_records, meta)
+
+    # 调用 LLM 生成分析
+    try:
+        import httpx
+        api_url = agent_cfg.get("base_url", "")
+        api_key = agent_cfg.get("api_key", "")
+        model_name = agent_cfg.get("model", "")
+
+        if not api_url or not api_key or not model_name:
+            raise HTTPException(status_code=500, detail="Agent LLM not configured for report generation")
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": "你是一个专业的 AI 模型评测分析师，擅长基于评测数据进行深度分析并生成结构化报告。"},
+                {"role": "user", "content": analysis_prompt},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 4096,
+        }
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{api_url}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            resp.raise_for_status()
+            llm_response = resp.json()
+            analysis_text = llm_response["choices"][0]["message"]["content"]
+
+    except Exception as e:
+        log.error(f"Report generation failed for {task_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"LLM analysis failed: {str(e)}")
+
+    # 组装报告数据
+    report = _assemble_report(summary_data, sample_records, analysis_text, meta)
+    JUDGE_REPORTS[task_id] = report
+    _save_judge_reports()
+
+    return report
+
+
+@app.get("/api/judge/report/{task_id}")
+async def get_judge_report(task_id: str):
+    """获取已生成的分析报告"""
+    report = JUDGE_REPORTS.get(task_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not generated yet")
+    return report
+
+
+def _build_report_prompt(summary_data: dict, sample_records: list, meta: dict) -> str:
+    """构建报告生成的 prompt"""
+    bench_name = meta.get("bench_name", "unknown")
+    model_names = meta.get("model_names", [])
+
+    prompt_parts = [
+        f"## 评测任务信息\n",
+        f"- Bench: {bench_name}",
+        f"- 评测模型: {', '.join(model_names)}\n",
+        f"## 聚合评分数据\n",
+        f"```json\n{json.dumps(summary_data, indent=2, ensure_ascii=False)}\n```\n",
+    ]
+
+    if sample_records:
+        prompt_parts.append(f"\n## 部分明细样本（前 20 条）\n")
+        prompt_parts.append(f"```json\n{json.dumps(sample_records[:10], indent=2, ensure_ascii=False)}\n```\n")
+
+    prompt_parts.append("""
+## 分析要求
+
+请基于以上评测数据生成一份结构化分析报告，包含以下部分：
+
+1. **总体评估**：各模型的综合表现对比，整体排名和评价
+2. **维度分析**：各评分维度（如有 think_score / body_score / overall_score）的对比分析
+3. **问题诊断**：基于 critical_issue 和 other_issues，分析高频问题和共性问题
+4. **Case Study**：挑选 2-3 个典型样本（高分/低分），分析评分原因
+5. **改进建议**：针对表现较弱的模型，给出具体改进方向
+
+请用中文输出，保持专业客观的语气。
+""")
+    return "\n".join(prompt_parts)
+
+
+def _assemble_report(summary_data: dict, sample_records: list, analysis_text: str, meta: dict) -> dict:
+    """组装报告数据结构（兼容前端 ReportView）"""
+    model_names = meta.get("model_names", [])
+    bench_name = meta.get("bench_name", "")
+
+    # 构建 overall 排名
+    model_scores = summary_data.get("model_stats", {})
+    overall_ranking = []
+    for name in model_names:
+        stats = model_scores.get(name, {})
+        avg = stats.get("avg_scores", {})
+        overall_ranking.append({
+            "model": name,
+            "overall_score": avg.get("overall_score", 0),
+            "think_score": avg.get("think_score", 0),
+            "body_score": avg.get("body_score", 0),
+        })
+    overall_ranking.sort(key=lambda x: x["overall_score"], reverse=True)
+
+    # 构建 radar 数据
+    radar_dimensions = ["think_score", "body_score", "overall_score"]
+    radar_data = {}
+    for name in model_names:
+        stats = model_scores.get(name, {})
+        avg = stats.get("avg_scores", {})
+        radar_data[name] = {dim: avg.get(dim, 0) for dim in radar_dimensions}
+
+    # 构建 error distribution
+    error_dist = {}
+    for name in model_names:
+        stats = model_scores.get(name, {})
+        issues = {}
+        for rec in stats.get("issue_counts", []):
+            issues[rec.get("issue", "unknown")] = rec.get("count", 0)
+        error_dist[name] = issues
+
+    return {
+        "task_id": meta.get("task_id"),
+        "bench_name": bench_name,
+        "generated_at": _now_iso(),
+        "overall": {
+            "ranking": overall_ranking,
+        },
+        "macro": {
+            "radar": {
+                "dimensions": radar_dimensions,
+                "data": radar_data,
+            },
+        },
+        "diagnostic": {
+            "error_distribution": error_dist,
+        },
+        "analyst": {
+            "summary": analysis_text,
+        },
+        "llm_summary": analysis_text,
+    }
 
 
 if __name__ == "__main__":
