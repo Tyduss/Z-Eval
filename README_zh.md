@@ -17,7 +17,7 @@
 [English](./README.md) | 简体中文
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/129d9826-a48b-4ab5-8006-ad7d9595cc95" alt="中文版演示" width="70%">
+  <img src="./static/logo/showcase.gif" alt="中文版演示" width="70%">
 </p>
 
 ## 📰 1. 最新动态
