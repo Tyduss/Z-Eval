@@ -1,24 +1,18 @@
 <div align="center">
-  <!-- TODO: Add Project Logo Here -->
-  <img src="./static/logo/logo.png" width="360" alt="One-Eval Logo" />
+  <img src="./static/logo/logo.png" width="360" alt="Z-Eval Logo" />
 
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-2F80ED?style=flat-square&logo=apache&logoColor=white)](./LICENSE)
-[![Repo Size](https://img.shields.io/github/repo-size/OpenDCAI/One-Eval?color=green)](https://github.com/OpenDCAI/One-Eval)
 [![ArXiv](https://img.shields.io/badge/ArXiv-Paper-b31b1b.svg?logo=arxiv)](https://arxiv.org/abs/2603.09821)
-
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/OpenDCAI/One-Eval)
-[![WeChat Group](https://img.shields.io/badge/WeChat-Group-brightgreen?logo=wechat&logoColor=white)](./static/logo/318QRcode.jpg)
 
 </div>
 
   <h4 align="center">
-    <i>✨ One Eval, Evaluation in One ✨</i>
+    <i>Z-Eval, Evaluation in One</i>
   </h4>
   <br>
 
-One-Eval is an automated Agent-based evaluation framework for Large Language Models, designed to achieve **NL2Eval**: automatically orchestrating evaluation workflows and generating reports from natural language requirements.\
-Built on [DataFlow](https://github.com/OpenDCAI/DataFlow) and [LangGraph](https://github.com/langchain-ai/langgraph), it emphasizes a traceable, interruptible, and scalable evaluation loop.
+> **Z-Eval** is based on the open-source project [OpenDCAI/One-Eval](https://github.com/OpenDCAI/One-Eval). Over two weeks of intensive development, we have made extensive enhancements on top of the original codebase, including multi-model comparative evaluation, LLM-as-a-Judge, local dataset support, task persistence, and a comprehensive frontend redesign.
 
 English | [简体中文](./README_zh.md)
 
@@ -28,30 +22,67 @@ English | [简体中文](./README_zh.md)
 
 ## 📰 1. News
 
-- **\[2026-03] 🎉 One-Eval (v0.1.0) is officially open-sourced!**\
-  We released the first version, supporting full-link automation from natural language to evaluation reports (NL2Eval). Say goodbye to tedious manual scripts and make LLM evaluation as simple, intuitive, and controllable as chatting. Welcome to Star 🌟 and follow!
+- **[2026-03] Z-Eval v1.0.0 Released!**
+  Based on OpenDCAI/One-Eval, we've added multi-model parallel evaluation, LLM Judge system, local dataset upload, task persistence, result preview & download, and a complete UI overhaul. Check out the [changelog](#-2-whats-new-in-z-eval) below for details.
 
-## 💡 Why One-Eval?
+## 🔍 2. What's New in Z-Eval?
 
-Traditional evaluation frameworks often require users to manually search for benchmarks, download data, and fill in extensive configuration parameters.\
-**One-Eval** aims to change this: **Everything that can be automated is handled by the Agent**. From benchmark recommendation to model evaluation, we are committed to providing the most direct and intuitive evaluation experience.
+Z-Eval inherits the powerful NL2Eval engine from [OpenDCAI/One-Eval](https://github.com/OpenDCAI/One-Eval) and extends it with the following major features:
 
-## 🔍 2. Overview
+### 🔀 Multi-Model Comparative Evaluation
+- Register multiple API models (OpenAI-compatible, Claude, Gemini, etc.) in Settings.
+- Select any combination of models for side-by-side parallel evaluation on the same benchmark.
+- Visual comparison of results across models with detailed score breakdowns.
 
-Traditional evaluation often faces pain points such as complex scripts, fragmented processes, and difficulty in reuse. One-Eval reconstructs evaluation into a **graph-based execution process (Graph / Node / State)**, dedicated to creating the next generation of interactive evaluation experience:
+### 🤖 LLM-as-a-Judge System
+- Built-in LLM Judge panel that leverages a configured model to evaluate open-ended or subjective responses.
+- Supports custom judge prompts and configurable judge model selection.
+- Judge scores are integrated into the evaluation summary alongside automated metrics.
+
+### 📁 Local Dataset Upload
+- Upload your own evaluation datasets (JSON/JSONL/CSV) directly from the frontend.
+- Uploaded datasets are stored server-side and can be selected in evaluation tasks just like built-in benchmarks.
+
+### 💾 Task Persistence & History
+- Evaluation tasks are now persisted to disk automatically.
+- Resume interrupted tasks or review past evaluations without re-running them.
+- Task history is accessible from the workspace sidebar.
+
+### 📊 Result Preview & Download
+- Preview evaluation results in a structured modal before downloading.
+- Export results in multiple formats (JSON, CSV) for further analysis or reporting.
+- Summary panel supports one-click preview and batch download.
+
+### ⚙️ Enhanced Model Management
+- Full CRUD for registered models: add, edit, delete, and toggle.
+- "Select All" button for quick batch operations.
+- API keys are hidden in edit mode for security.
+- Custom model name input for flexible model identification.
+
+### 🎨 UI/UX Overhaul
+- Complete visual refresh of the frontend with a modern, clean design.
+- Improved multi-model selection interface with intuitive toggle controls.
+- Tab layout refinements for better navigation in the evaluation workspace.
+
+## 💡 Why Z-Eval?
+
+Traditional evaluation frameworks often require users to manually search for benchmarks, download data, and fill in extensive configuration parameters.
+**Z-Eval** aims to change this: **Everything that can be automated is handled by the Agent**. With multi-model support, LLM Judge, and local datasets, we provide a comprehensive evaluation platform — from benchmark discovery to granular metric analysis, all in one place.
+
+## 🔍 3. Overview
+
+Z-Eval reconstructs evaluation into a **graph-based execution process (Graph / Node / State)**, powered by [DataFlow](https://github.com/OpenDCAI/DataFlow) and [LangGraph](https://github.com/langchain-ai/langgraph):
 
 - 🗣️ **NL2Eval**: Just input a natural language goal (e.g., "Evaluate the model's performance on math reasoning tasks"), and the system automatically parses the intent and plans the execution path.
 - 🧩 **End-to-End Automation**: Automatically completes benchmark recommendation, data preparation, inference execution, metric matching, scoring, and multi-dimensional report generation.
 - ⏸️ **Human-in-the-Loop**: Supports interruption and human intervention at key nodes (such as benchmark selection, result review), facilitating real-time adjustment of evaluation strategies based on feedback.
 - 📊 **Scalable Architecture**: Based on the DataFlow operator system and LangGraph state management, it easily integrates private datasets and custom metrics.
 
-<!-- TODO: Add One-Eval Framework Diagram Here -->
+![Z-Eval Framework](./static/logo/eval_framework.png)
 
-![One-Eval Framework](./static/logo/eval_framework.png)
+## ⚡ 4. Quick Start
 
-## ⚡ 3. Quick Start
-
-### 3.1 Installation (Recommended)
+### 4.1 Installation (Recommended)
 
 We provide two environment management methods: Conda and uv. Choose one to get started quickly:
 
@@ -70,9 +101,9 @@ uv venv
 uv pip install -e .
 ```
 
-### 3.2 Start Services
+### 4.2 Start Services
 
-One-Eval adopts a separation of frontend and backend architecture. Please start the backend API and frontend interface respectively.
+Z-Eval adopts a separation of frontend and backend architecture. Please start the backend API and frontend interface respectively.
 
 #### ① Start Backend (FastAPI)
 
@@ -92,9 +123,9 @@ Visit <http://localhost:5173> to start interactive evaluation.
 
 > Note: After starting, please enter the settings interface first to configure parameters such as API, model, and HF Token (to support batch data download), and click save.
 
-### 3.3 Minimal Code Mode (Developer Mode)
+### 4.3 Minimal Code Mode (Developer Mode)
 
-If you prefer to call directly in code, you can run the built-in complete workflow example:\
+If you prefer to call directly in code, you can run the built-in complete workflow example:
 [workflow_all.py](./one_eval/graph/workflow_all.py)
 
 ```bash
@@ -104,9 +135,9 @@ python -m one_eval.graph.workflow_all "I want to evaluate my model's performance
 
 This Graph demonstrates the complete closed loop from Query parsing to report generation. You are welcome to develop and extend nodes based on this.
 
-## 🗂️ 4. Bench Gallery
+## 🗂️ 5. Bench Gallery
 
-One-Eval has a built-in rich **Bench Gallery** for unified management of meta-information of various evaluation benchmarks (such as task type, data format, Prompt template).
+Z-Eval has a built-in rich **Bench Gallery** for unified management of meta-information of various evaluation benchmarks (such as task type, data format, Prompt template).
 
 > Currently covering mainstream text-only capability dimensions (no complex sandbox environment required):
 >
@@ -116,39 +147,37 @@ One-Eval has a built-in rich **Bench Gallery** for unified management of meta-in
 
 ![Bench Gallery](./static/logo/gallery.png)
 
-## 🚀 5. Future Work
+## 🚀 6. Future Work
 
-We plan to continuously maintain and update One-Eval in the following directions:
+We plan to continuously maintain and update Z-Eval in the following directions:
 
 - 💻 **Support for Complex Evaluation Scenarios**: Extend support for LLM evaluation fields that require additional execution environments, such as Code and Text2SQL.
 - 🤖 **Agentic Evaluation & Sandbox Environments**: Support evaluation in Agentic domains (e.g., SWE-bench) that rely on complex sandbox environments.
+- 📈 **Enhanced LLM Judge**: More judge strategies, chain-of-thought judging, and multi-judge ensemble for more reliable subjective evaluation.
 - 🌐 **Online Community & Platform**: Deploy an online evaluation platform where users can discuss, build, share, and use their own custom benchmarks.
 
-🙌 **Join Us**: We warmly welcome co-workers to join our open-source project! Feel free to contact us directly for co-development. We highly support contributors in exploring different directions and achieving their own outputs (e.g., collaborating on paper submissions).
+## 📮 7. Contact & Citation
 
-## 📮 6. Contact & Citation
+If you are interested in this project, or have any questions or suggestions, please contact us via Issue.
 
-If you are interested in this project, or have any questions or suggestions, please contact us via Issue or join our WeChat group.
+- 📮 [GitHub Issues](../../issues): Submit bugs or feature suggestions.
+- 🔧 [GitHub Pull Requests](../../pulls): Contribute code improvements.
 
-•	📮 [GitHub Issues](../../issues): Submit bugs or feature suggestions.
+## Acknowledgements
 
-•	🔧 [GitHub Pull Requests](../../pulls): Contribute code improvements.
-
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/306ab88b-024f-4a44-877f-f4c39f77ab32" width="30%">
-</div>
+Z-Eval is built upon the excellent work of [OpenDCAI/One-Eval](https://github.com/OpenDCAI/One-Eval). We sincerely thank the original authors for their contribution to the open-source community.
 
 ## Citation
 
 ```bibtex
 @misc{shen2026oneevalagenticautomatedtraceable,
-      title={One-Eval: An Agentic System for Automated and Traceable LLM Evaluation}, 
+      title={One-Eval: An Agentic System for Automated and Traceable LLM Evaluation},
       author={Chengyu Shen and Yanheng Hou and Minghui Pan and Runming He and Zhen Hao Wong and Meiyi Qiang and Zhou Liu and Hao Liang and Peichao Lai and Zeang Sheng and Wentao Zhang},
       year={2026},
       eprint={2603.09821},
       archivePrefix={arXiv},
       primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2603.09821}, 
+      url={https://arxiv.org/abs/2603.09821},
 }
 
 @article{liang2025dataflow,
@@ -159,10 +188,6 @@ If you are interested in this project, or have any questions or suggestions, ple
 }
 ```
 
-<br>
+## License
 
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/c336e460-b782-49a4-95b2-849b6d479334" height="40" alt="Partner 1" style="margin: 0 15px;" />
-  <img src="https://github.com/user-attachments/assets/2ec354ff-7b40-47dd-b8e2-c38e7169078b" height="40" alt="Partner 2" style="margin: 0 15px;" />
-  <!-- To add more partners, just insert new img tags here and keep the height consistent for horizontal scaling -->
-</div>
+This project is licensed under the Apache License 2.0 — see the [LICENSE](./LICENSE) file for details.
