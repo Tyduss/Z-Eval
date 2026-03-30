@@ -42,7 +42,7 @@ export const Sidebar = () => {
     <aside className="fixed left-0 top-0 bottom-0 w-16 bg-white border-r border-slate-200 flex flex-col items-center py-6 z-[100]">
       {/* Logo */}
       <div className="mb-8">
-        <img src="/static/logo/logo.png" className="w-10 h-10 rounded-xl object-cover" alt="One-Eval" />
+        <img src="/static/logo/logo.png" className="w-10 h-10 rounded-xl object-cover" alt="Z-Eval" />
       </div>
 
       {/* Nav Items */}
