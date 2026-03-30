@@ -1395,7 +1395,7 @@ export const Eval = () => {
            <header className="px-6 h-16 flex justify-between items-center bg-white/80 backdrop-blur-md border-b border-slate-200 z-20">
              <div className="flex items-center gap-2">
                 <h2 className="font-bold text-lg text-slate-900 tracking-tight flex items-center gap-2">
-                    OneEval <span className="text-blue-600">{t({ zh: "工作台", en: "Studio" })}</span>
+                    Z-Eval <span className="text-blue-600">{t({ zh: "工作台", en: "Studio" })}</span>
                 </h2>
              </div>
              

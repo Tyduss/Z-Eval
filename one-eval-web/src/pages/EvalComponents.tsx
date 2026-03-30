@@ -927,7 +927,7 @@ export const ChatPanel = ({ messages, status, onSendMessage, onConfirm, onStop, 
                             <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center text-white shadow-lg shadow-violet-500/20">
                                 <Bot className="w-5 h-5" />
                             </div>
-                            <span>{tt("OneEval 助手", "OneEval Assistant")}</span>
+                            <span>{tt("Z-Eval 助手", "Z-Eval Assistant")}</span>
                         </div>
                         <div className="flex items-center gap-2">
                             <div className={cn("w-2 h-2 rounded-full", status === "running" ? "bg-green-500 animate-pulse" : "bg-slate-300")} />

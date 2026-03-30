@@ -220,3 +220,8 @@ TODO_脱敏方案.md
 one_eval/utils/bench_table/bench_gallery_local.json
 one_eval/utils/bench_table/bench_gallery.json.bak*
 one_eval/server/uploads/
+
+# 本地规划/历史/结果目录不入库
+PLANS/
+历史修改/
+results/

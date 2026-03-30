@@ -137,8 +137,8 @@ export const Home = () => {
       {/* Navbar Placeholder */}
       <nav className="flex justify-between items-center px-8 py-6 z-10">
         <div className="text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-3">
-            <img src="/static/logo/logo.png" className="w-10 h-10 rounded-lg object-cover" alt="One-Eval" />
-            <span>One-Eval</span>
+            <img src="/static/logo/logo.png" className="w-10 h-10 rounded-lg object-cover" alt="Z-Eval" />
+            <span>Z-Eval</span>
         </div>
         <div className="flex items-center gap-2">
             <a
@@ -155,13 +155,13 @@ export const Home = () => {
               </span>
             </a>
             <a
-              href="https://github.com/OpenDCAI/One-Eval"
+              href="https://github.com/Tyduss/One-Eval"
               target="_blank"
               rel="noreferrer"
               className="pl-3 pr-2 h-9 inline-flex items-center gap-2 rounded-full text-xs font-semibold text-slate-900 bg-white border border-slate-200 shadow-sm hover:shadow transition-shadow"
             >
               <Github className="w-4 h-4" />
-              <span>One-Eval</span>
+              <span>Z-Eval</span>
               <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-700">
                 <Star className="w-3 h-3 fill-slate-700 text-slate-700" />
                 {formatStars(stars.oneEval)}
@@ -189,11 +189,11 @@ export const Home = () => {
           {/* Badge */}
           <div className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-sm text-slate-600 shadow-sm mb-4">
             <span className="flex h-2 w-2 rounded-full bg-blue-500 mr-2 animate-pulse"></span>
-            {t({ zh: "v0.1.0 已发布", en: "v0.1.0 is now available" })}
+            {t({ zh: "欢迎使用v1.0.0版本", en: "Welcome to v1.0.0" })}
           </div>
 
           <h1 className="text-5xl md:text-7xl font-bold tracking-tight text-slate-900 leading-[1.1]">
-            One-Eval <br />
+            Z-Eval <br />
             <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-violet-600">
               {t({
                 zh: "一句话交给 Agent 完成评测",
@@ -204,8 +204,8 @@ export const Home = () => {
           
           <p className="text-xl text-slate-600 max-w-2xl mx-auto leading-relaxed">
             {t({
-              zh: "使用统一的图引擎编排复杂评测流程，从基准发现到细粒度指标分析，一站式完成。",
-              en: "Orchestrate complex evaluation workflows with a unified, graph-based engine. From dataset discovery to granular metrics, all in one place.",
+              zh: "基于OpenDCAI/One-Eval开源项目，使用统一的图引擎编排复杂评测流程，支持本地/API多模型竞对评测，从基准发现到细粒度指标分析，一站式完成。",
+              en: "Based on the OpenDCAI/One-Eval open-source project, orchestrate complex evaluation workflows with a unified graph engine. Supports local/API multi-model comparative evaluation. From benchmark discovery to granular metrics, all in one place.",
             })}
           </p>
 
