@@ -82,6 +82,8 @@ Z-Eval reconstructs evaluation into a **graph-based execution process (Graph / N
 
 ## ⚡ 4. Quick Start
 
+> **First time deploying?** Check the [Deployment Guide](./DEPLOY_GUIDE_en.md) for detailed instructions and troubleshooting.
+
 ### 4.1 Installation (Recommended)
 
 We provide two environment management methods: Conda and uv. Choose one to get started quickly:
